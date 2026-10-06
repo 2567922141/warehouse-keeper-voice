@@ -25,7 +25,7 @@ Warehouse Keeper 的可选语音取货附加包。玩家按住指定按键说出
 | Fabric Loader | 0.19.3 或更高（实测 0.19.5） |
 | Fabric API | 0.161.0+26.3（或兼容版本） |
 | Java | 25 或更高 |
-| 主体模组 | warehouse-keeper 1.1.4 或更高 |
+| [warehouse-keeper（主体包）](https://github.com/2567922141/warehouse-keeper) | 1.1.4 或更高 |
 | 操作系统 | Windows x64（当前仅随包提供 Windows 原生库） |
 
 ## 安装
