@@ -1,6 +1,6 @@
 # Warehouse Keeper Voice
 
-**声明**
+## 声明
 
 这是一个 100% Vibe Coding 项目，所有代码及代码审查均有 AI 负责，人工负责真机测试。
 
@@ -10,7 +10,7 @@ This is a 100% Vibe Coding project: all coding and code review were done by AI, 
 
 AI can make mistakes. It is intended for vibe coding and learning purposes only — do not use it in industrial production or any other critical field. Any losses are your own responsibility!!!
 
-**简介**
+## 简介
 
 Warehouse Keeper 的可选语音取货附加包。玩家按住指定按键说出取货需求（例如「红色染色玻璃 十二个」），
 本附加包在本机离线完成语音识别，将其解析为仓库取货指令并交由搬运工送货。
