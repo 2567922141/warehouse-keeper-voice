@@ -41,7 +41,7 @@ Warehouse Keeper 的可选语音取货附加包首个发行版。玩家按住按
 | `V`（按住） | 按住说话，松开后立即识别 |
 | `B` | 切换聊天栏是否显示另一识别模型的识别结果（两个模型始终同时运行） |
 
-完整说明见附件 `Warehouse-Keeper-Voice-0.1.0-使用说明.md`。
+完整说明见附件 `warehouse-keeper-voice-0.1.0-guide-zh_cn.md`（即仓库内 `docs/使用说明.md`）。
 
 ## 已知限制
 
