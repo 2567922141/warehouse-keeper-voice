@@ -13,7 +13,7 @@ import java.nio.IntBuffer;
 import java.util.Arrays;
 
 /**
- * 麦克风采集线程：16 kHz / 单声道 / 16 位 PCM，只采到内存，绝不落盘。
+ * 麦克风采集线程：48 kHz / 单声道 / 16 位 PCM，只采到内存，绝不落盘。
  *
  * <p>首选 OpenAL：Minecraft 客户端运行时本来就带着 LWJGL 的 OpenAL Soft
  * （模组不需要打包任何原生库），直接把目标采样率交给它转换，也避开了
@@ -30,8 +30,8 @@ final class MicCapture extends Thread {
      * 采集采样率：按设备原生档位取 48 kHz，**不再**让 OpenAL 直接降到 16 kHz。
      *
      * <p>原因：设备是 48 kHz 时，请求 16 kHz 会走 OpenAL Soft 的采集重采样，实测会糊掉
-     * 辅音（「玻璃」被听成「帮你」）。改成原生 48 kHz 采集、由 Vosk 自己重采样到模型的
-     * 16 kHz（它本来就能吃任意采样率的 WAV），语音清晰度明显更好。
+     * 辅音（「玻璃」被听成「帮你」）。改成原生 48 kHz 采集、由 sherpa-onnx 在解码时重采样到
+     * 模型要的 16 kHz，语音清晰度明显更好。
      */
     static final int SAMPLE_RATE = 48000;
 
@@ -80,7 +80,7 @@ final class MicCapture extends Thread {
         return error;
     }
 
-    /** 复制一份已录到的 PCM（16 kHz / 单声道 / 16 位小端），交给识别线程用。 */
+    /** 复制一份已录到的 PCM（48 kHz / 单声道 / 16 位小端），交给识别线程用。 */
     byte[] pcmSnapshot() {
         synchronized (pcmLock) {
             return Arrays.copyOf(pcm, pcmLength);

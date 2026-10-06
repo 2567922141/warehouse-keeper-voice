@@ -268,6 +268,8 @@ final class VoiceSession {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
+        // 关游戏/退服也要把内存里的音频清零：任何路径都不留残余（音频从不落盘）
+        current.wipe();
     }
 
     /** 走原版动作栏：26.3 的 HUD 是「抽取—提交」新模型，第 1 期先不自己画。 */
