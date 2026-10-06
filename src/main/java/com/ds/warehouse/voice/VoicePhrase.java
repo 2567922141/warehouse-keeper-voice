@@ -37,8 +37,9 @@ final class VoicePhrase {
 
     /** 与主体模组一致的单次下单上限。 */
     private static final int MAX_ORDER = 4096;
-    /** 上一句没听出来的话（用于「下次说对了就把它记住」）。 */
+    /** 上一句没听出来的话 + 当时最像的物品 id（用于「下次说对同一件东西就把它记住」）。 */
     private static String lastFailed;
+    private static String lastFailedId;
     private static long lastFailedAt;
     /** 超过这么久就不再关联上一句失败（毫秒）。 */
     private static final long FAILED_MEMORY_MS = 90_000L;
@@ -67,7 +68,7 @@ final class VoicePhrase {
      */
     static String handle(SherpaEngine.Line primary, List<SherpaEngine.Line> others) {
         String heard = primary.text();
-        Decision decision = decide(heard);
+        Decision decision = decide(heard, true);
         SherpaEngine.Line rescuedBy = null;
         if (!decision.order()) {
             if (!decision.noMatch()) {
@@ -78,7 +79,7 @@ final class VoicePhrase {
                 if (text == null || text.isEmpty() || text.equals(heard)) {
                     continue;
                 }
-                Decision alt = decide(text);
+                Decision alt = decide(text, true);
                 if (alt.order() && alt.match() != null) {
                     decision = alt;
                     rescuedBy = other;
@@ -107,16 +108,16 @@ final class VoicePhrase {
         return "已请求取货：" + want + " 个 " + item.name() + byStack(match) + note + "（服务器确认后会派假人）";
     }
 
-    /** 只判断、不下单：对比模式里用来看另一个模型「会取什么」。 */
+    /** 只判断、不下单：显示另一个模型「会取什么」用，**不写任何状态**（别名表/上一句失败）。 */
     static String preview(String heard) {
-        return decide(heard).message();
+        return decide(heard, false).message();
     }
 
     private static String byStack(VoiceText.Match match) {
         return match.byStack() ? "（按一组 " + match.unitSize() + " 个算）" : "";
     }
 
-    private static Decision decide(String heard) {
+    private static Decision decide(String heard, boolean commit) {
         if (!canOrder()) {
             return Decision.refuse("没有取货权限（命令没同步给你）：让管理员在仓库面板「权限」页给你 take 权限，或 /op 你");
         }
@@ -132,13 +133,14 @@ final class VoicePhrase {
             return Decision.refuse("没听清，请再说一次");
         }
         // ① 先查别名表（自动记住的 + 玩家手写的），命中就直接用——这样「以后才会出现的偏差」
-        //    只要被纠正过一次，之后就一直是对的。
+        //    只要被纠正过一次，之后就一直是对的。别名只负责**定位物品**，数量仍从这句话里解析
+        //    （别名键是含数量的整句，写死 1 会让「12 个」永远只取 1 个）。
         VoiceText.Match match = null;
         String aliasId = VoiceAlias.lookup(text);
         if (aliasId != null) {
             VoiceText.Candidate aliased = find(candidates, aliasId);
             if (aliased != null) {
-                match = new VoiceText.Match(aliased, 1, itemStackSize(aliasId), false, 1.0D, 1.0D);
+                match = VoiceText.byAlias(aliased, text, VoicePhrase::itemStackSize);
             }
         }
         // ② 再走闭集模糊匹配（字形 + 拼音）
@@ -146,23 +148,34 @@ final class VoicePhrase {
             match = VoiceText.best(candidates, text, VoicePhrase::itemStackSize);
         }
         if (match == null) {
-            // 记住这句没听出来的话：接下来 90 秒内只要有一次说对了，就把它自动写进别名表
-            lastFailed = text;
-            lastFailedAt = System.currentTimeMillis();
+            // 记住这句没听出来的话，以及**当时最像的是哪一件**：只有下次说对、且指的还是同一件
+            // 东西时才写进别名表（否则「下界合金剑」失败后说「石头」会把剑永久绑成石头）。
+            if (commit) {
+                lastFailed = text;
+                lastFailedAt = System.currentTimeMillis();
+                VoiceText.Candidate closest = VoiceText.closestCandidate(candidates, text);
+                lastFailedId = closest == null ? null : closest.id();
+            }
             return Decision.noMatch("没听出物品名（" + heard + "）——最接近的是："
                     + String.join(" / ", VoiceText.closestNames(candidates, text, 3))
                     + "；说对一次我就会记住");
         }
         // 靠模糊匹配救回来的（不是完全命中）就记进别名表，下次直接命中
-        if (match.score() < 0.95D) {
+        if (commit && match.score() < 0.95D) {
             VoiceAlias.remember(heard, match.candidate().id());
         }
-        // 上一句没听出来、这一句说对了：把上一句的错法也记住（以后同样的错法也能听懂）
-        if (lastFailed != null && System.currentTimeMillis() - lastFailedAt <= FAILED_MEMORY_MS
+        // 上一句没听出来、这一句说对了，**且两次指的是同一件东西**时，才把上一句的错法也记住。
+        // 不校验同一件东西的话，上一句无关的话会被永久绑到这次的物品上（以后直接下错单）。
+        if (commit && lastFailed != null && lastFailedId != null
+                && lastFailedId.equals(match.candidate().id())
+                && System.currentTimeMillis() - lastFailedAt <= FAILED_MEMORY_MS
                 && !lastFailed.equals(text)) {
             VoiceAlias.remember(lastFailed, match.candidate().id());
         }
-        lastFailed = null;
+        if (commit) {
+            lastFailed = null;
+            lastFailedId = null;
+        }
         int want = Math.max(1, match.count());
         String what = want + " 个 " + match.candidate().name() + byStack(match);
         if (want > MAX_ORDER) {
@@ -210,7 +223,9 @@ final class VoicePhrase {
             var warehouse = mc.player.connection.getCommands().getRoot().getChild("warehouse");
             return warehouse != null && warehouse.getChild("order") != null;
         } catch (Throwable t) {
-            return true;
+            // 拿不到命令树时保守拒绝（fail-closed）：发一条注定报错的命令，不如直接说人话
+            LOG.debug("命令树查询失败，按无权限处理：{}", t.toString());
+            return false;
         }
     }
 

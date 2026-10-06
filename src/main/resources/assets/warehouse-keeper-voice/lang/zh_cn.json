@@ -1,4 +1,3 @@
 {
-  "key.warehouse-keeper-voice.talk": "语音取货（按住说话，松开识别）",
-  "key.warehouse-keeper-voice.compare": "切换语音双模型（两个模型一起跑，互相补位）"
+  "key.warehouse-keeper-voice.talk": "语音取货（按住说话，松开识别）"
 }

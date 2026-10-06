@@ -57,7 +57,8 @@ final class VoiceAlias {
         table.put(key, itemId);
         dirty = true;
         save(table);
-        LOG.info("记住语音别名：{} → {}", key, itemId);
+        // 只记字数和物品 id：识别出的原话不进游戏日志（日志不在 config 目录下）
+        LOG.info("记住语音别名：{} 个字 → {}", key.length(), itemId);
     }
 
     private static Map<String, String> load() {

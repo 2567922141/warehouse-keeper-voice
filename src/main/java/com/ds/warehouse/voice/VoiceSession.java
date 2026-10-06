@@ -61,11 +61,17 @@ final class VoiceSession {
         return capture != null;
     }
 
-    /** 键按下（按住说话）：还没在录就开始。 */
+    /** 键按下（按住说话）：还没在录、且上一句已经识别完，才开始。 */
     static void press() {
-        if (capture == null) {
-            start();
+        if (capture != null) {
+            return;
         }
+        if (recognizing) {
+            // 上一句还在识别（大模型可能要几秒）：这时再录会让两段音频同时在内存里，也可能连下两单
+            overlay("上一句还在识别，稍等一下再说");
+            return;
+        }
+        start();
     }
 
     /** 键松开：结束这一段。没在录时什么也不做。 */
@@ -179,7 +185,15 @@ final class VoiceSession {
             long took = System.currentTimeMillis() - began;
             String problemFinal = problem;
             List<SherpaEngine.Line> linesFinal = lines;
-            Minecraft.getInstance().execute(() -> report(linesFinal, problemFinal, took));
+            Minecraft.getInstance().execute(() -> {
+                try {
+                    report(linesFinal, problemFinal, took);
+                } catch (Throwable t) {
+                    // report 里会发取货指令、动界面；玩家正好断线时抛出的异常不能逃逸进主线程任务队列
+                    LOG.warn("语音处理出错：{}", t.toString());
+                    overlay("语音处理出错：" + t);
+                }
+            });
         }, "warehouse-keeper-voice-recognizer");
         worker.setDaemon(true);
         worker.start();

@@ -31,7 +31,7 @@ Warehouse Keeper 的可选语音取货附加包。玩家按住指定按键说出
 ## 安装
 
 1. 安装主体模组 `warehouse-keeper`（服务端与客户端均需安装）。
-2. 将 `warehouse-keeper-voice-0.1.0.jar` 放入客户端 `mods/` 目录。
+2. 将 `warehouse-keeper-voice-0.1.1.jar` 放入客户端 `mods/` 目录。
 3. 服务端无需安装本附加包。
 
 语音下单沿用主体模组的取货权限，需由管理员在仓库面板「权限」页授予该玩家取货权限。
@@ -41,7 +41,9 @@ Warehouse Keeper 的可选语音取货附加包。玩家按住指定按键说出
 | 按键 | 功能 |
 | --- | --- |
 | `V`（按住） | 按住说话，松开后立即识别 |
-| `B` | 切换聊天栏是否显示另一识别模型的识别结果（两个模型始终同时运行） |
+
+聊天栏是否多显示另一个模型那一行，由 `config/warehouse-keeper-voice/settings.txt` 的 `compare=on|off`
+控制（不占用快捷键 —— 主体模组默认用 `B` 打开仓库面板，本附加包不抢这个键）。
 
 首次使用时会随包解压语音模型与原生库至 `config/warehouse-keeper-voice/`（约 450 MB），
 该过程仅执行一次；此后每次启动均在后台预先装载模型。

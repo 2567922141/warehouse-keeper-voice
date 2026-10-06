@@ -16,6 +16,7 @@ import org.slf4j.LoggerFactory;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.JarURLConnection;
 import java.net.URL;
 import java.net.URLConnection;
 import java.nio.charset.StandardCharsets;
@@ -46,7 +47,7 @@ import java.util.concurrent.Future;
  *
  * <p>设置写在 {@code config/warehouse-keeper-voice/settings.txt}（第一次运行自动生成）：
  * {@code primary} 决定哪一路排在最前面，{@code compare} 决定聊天栏里要不要多显示另一个模型那一行，
- * {@code parallel} 是否并行，{@code preload} 是否进游戏后台预装。游戏里按 B 切换显示。
+ * {@code parallel} 是否并行，{@code preload} 是否进游戏后台预装。改完重进游戏生效。
  *
  * <p>模型与原生库只在**第一次**解压到硬盘（{@code config/warehouse-keeper-voice/}），
  * 之后每次都直接调用硬盘上的文件（大小和语音包里一致就不再解压），进游戏时后台预装。
@@ -84,11 +85,28 @@ final class SherpaEngine {
     private static final double MAX_GAIN = 8.0D;
 
     private static final Map<String, OfflineRecognizer> LOADED = new ConcurrentHashMap<>();
-    private static final Map<String, String> FAILURES = new ConcurrentHashMap<>();
+    /** 失败记录：给玩家看的原因 + 记录时间（过一段时间允许重试，瞬时失败不该让模型整局不可用）。 */
+    private record Failure(String message, long at) {
+    }
+
+    private static final Map<String, Failure> FAILURES = new ConcurrentHashMap<>();
+    /** 装载失败后过多久允许再试一次。 */
+    private static final long RETRY_MS = 60_000L;
     /** 每个模型一把锁：后台预装和「按住说话」可能同时要同一个模型，别把 350 MB 模型装两遍。 */
     private static final Map<String, Object> SPEC_LOCKS = Map.of(
             PARAFORMER.key(), new Object(),
             ZIPFORMER.key(), new Object());
+    /**
+     * 原生库只加载一次的锁。
+     *
+     * <p>**必须**是独立的一把锁，不能用类监视器：识别线程走 {@code prepare() → ensure()}
+     * （类监视器 → 模型锁），预装线程走 {@code ensure() → prepareNatives()}（模型锁 → 类监视器），
+     * 用类监视器就是标准的 AB-BA 死锁 —— 语音引擎永久卡死，且主线程按 B 时也会被冻住
+     * （{@code toggleShowOther()} 同样要类监视器）。
+     */
+    private static final Object NATIVE_LOCK = new Object();
+    /** 设置文件的锁（与模型锁、原生库锁相互独立，不会形成环）。 */
+    private static final Object SETTINGS_LOCK = new Object();
 
     /** 两个模型并行识别用的线程池（守护线程，进程退出时自己结束）。 */
     private static final ExecutorService POOL = Executors.newFixedThreadPool(2, runnable -> {
@@ -97,13 +115,13 @@ final class SherpaEngine {
         return thread;
     });
 
-    private static String primaryKey = PARAFORMER.key();
+    private static volatile String primaryKey = PARAFORMER.key();
     /** 聊天栏里要不要多显示另一个模型那一行（两个模型无论如何都会跑）。 */
-    private static boolean showOther = true;
-    private static boolean parallel = true;
-    private static boolean preload = true;
-    private static boolean preloadStarted;
-    private static boolean settingsLoaded;
+    private static volatile boolean showOther = true;
+    private static volatile boolean parallel = true;
+    private static volatile boolean preload = true;
+    private static volatile boolean preloadStarted;
+    private static volatile boolean settingsLoaded;
 
     /** 一路识别结果。 */
     record Line(String label, String text, boolean primary, String problem) {
@@ -112,8 +130,14 @@ final class SherpaEngine {
     private SherpaEngine() {
     }
 
-    /** 就绪返回 null，否则返回给玩家看的中文原因（只尝试一次，不反复失败）。 */
-    static synchronized String prepare() {
+    /**
+     * 就绪返回 null，否则返回给玩家看的中文原因。
+     *
+     * <p>**不能**加 {@code synchronized}：那会在持有类监视器时再去抢模型锁，与
+     * {@code ensure() → prepareNatives()} 的方向相反，构成 AB-BA 死锁（见 {@link #NATIVE_LOCK}）。
+     * 「只装载一次」由每模型锁保证。
+     */
+    static String prepare() {
         loadSettings();
         return ensure(primarySpec());
     }
@@ -129,7 +153,7 @@ final class SherpaEngine {
             LOG.info("语音预加载已关闭（settings.txt 里 preload=off），第一次说话时再装模型");
             return;
         }
-        synchronized (SherpaEngine.class) {
+        synchronized (SETTINGS_LOCK) {
             if (preloadStarted) {
                 return;
             }
@@ -209,14 +233,6 @@ final class SherpaEngine {
         return showOther;
     }
 
-    /** 按 B 切换「显示另一个模型的结果」并写回设置，返回切换后的状态。 */
-    static synchronized boolean toggleShowOther() {
-        loadSettings();
-        showOther = !showOther;
-        saveSettings();
-        return showOther;
-    }
-
     // ------------------------------------------------------------------ 内部
 
     private static List<Line> runSequential(List<Spec> specs, float[] samples) {
@@ -290,9 +306,14 @@ final class SherpaEngine {
             if (LOADED.containsKey(spec.key())) {
                 return null;
             }
-            String failed = FAILURES.get(spec.key());
+            Failure failed = FAILURES.get(spec.key());
             if (failed != null) {
-                return failed;
+                if (System.currentTimeMillis() - failed.at() < RETRY_MS) {
+                    return failed.message();
+                }
+                // 到点了：清掉失败记录再试一次（瞬时 IO 失败不该让这个模型整局都用不了）
+                FAILURES.remove(spec.key());
+                LOG.info("重试装载语音模型：{}（上次失败：{}）", spec.key(), failed.message());
             }
             try {
                 Path base = configDir();
@@ -304,7 +325,7 @@ final class SherpaEngine {
                 return null;
             } catch (Throwable t) {
                 String message = describe(t);
-                FAILURES.put(spec.key(), message);
+                FAILURES.put(spec.key(), new Failure(message, System.currentTimeMillis()));
                 LOG.warn("语音模型没准备好：{} → {}", spec.key(), message);
                 return message;
             }
@@ -431,24 +452,28 @@ final class SherpaEngine {
      * 是 1.17.1，用错会直接崩）。必须在任何 sherpa 类被首次使用之前调用。
      *
      * <p>方法同时负责「原生库只加载一次」：属性设好之后主动 {@link LibraryUtils#load()} 一次，
-     * 这样后面两个模型并行加载时不会同时去动原生库。
+     * 这样后面两个模型并行加载时不会同时去动原生库。用的是独立的 {@link #NATIVE_LOCK}，
+     * 刻意不用类监视器 —— 否则会和每模型锁形成 AB-BA 死锁。
      */
-    private static synchronized void prepareNatives(Path dir) throws IOException {
-        Files.createDirectories(dir);
-        for (String name : NATIVE_FILES) {
-            Path target = dir.resolve(name);
-            if (Files.isRegularFile(target) && Files.size(target) > 0) {
-                continue;
+    private static void prepareNatives(Path dir) throws IOException {
+        synchronized (NATIVE_LOCK) {
+            Files.createDirectories(dir);
+            for (String name : NATIVE_FILES) {
+                Path target = dir.resolve(name);
+                // 和模型文件一样按「语音包里的字节数」校验：上次解压中断留下的半个 DLL
+                // 以前会被 size>0 放过去，之后报 UnsatisfiedLinkError 且永不自愈。
+                if (ensureFile(NATIVE_RESOURCE_DIR + name, target)) {
+                    LOG.info("首次解压语音原生库到硬盘（以后都直接调用）：{}", target);
+                }
             }
-            extract(NATIVE_RESOURCE_DIR + name, target);
-            LOG.info("首次解压语音原生库到硬盘（以后都直接调用）：{}", target);
-        }
-        System.setProperty("sherpa_onnx.native.path", dir.toAbsolutePath().toString());
-        try {
-            LibraryUtils.load();
-        } catch (Throwable t) {
-            // 加载失败留给后面真正用模型时报错（这里的异常信息更完整）
-            LOG.warn("原生库预加载失败（后面会再试）：{}", describe(t));
+            System.setProperty("sherpa_onnx.native.path", dir.toAbsolutePath().toString());
+            try {
+                LibraryUtils.load();
+            } catch (Throwable t) {
+                // 这里必须当致命错误：一旦放过去，sherpa 会退化成「把 jar 里的原生库解压到
+                // %TEMP%」（config 目录之外写盘，违背本附加包的隐私约定）。
+                throw new IOException("原生库加载失败：" + describe(t), t);
+            }
         }
     }
 
@@ -498,7 +523,13 @@ final class SherpaEngine {
                 return -1L;
             }
             URLConnection connection = url.openConnection();
-            connection.setUseCaches(false);
+            // jar 内的条目直接问 JarEntry 要大小。**不要** setUseCaches(false)：
+            // 那会让每次查询都新建一个 JarFile 且从不关闭（Windows 上表现为语音包被占用）。
+            if (connection instanceof JarURLConnection jar) {
+                var entry = jar.getJarEntry();
+                long size = entry == null ? -1L : entry.getSize();
+                return size > 0L ? size : -1L;
+            }
             long size = connection.getContentLengthLong();
             return size > 0L ? size : -1L;
         } catch (Throwable t) {
@@ -506,18 +537,30 @@ final class SherpaEngine {
         }
     }
 
-    /** 把随包的资源解压到磁盘。 */
+    /** 把随包的资源解压到磁盘（先写 .part 再原子改名；失败时清掉 .part）。 */
     private static void extract(String resource, Path target) throws IOException {
         Files.createDirectories(target.getParent());
-        try (InputStream in = SherpaEngine.class.getResourceAsStream(resource)) {
-            if (in == null) {
-                throw new IOException("语音包里缺少 " + resource);
-            }
-            Path temp = target.resolveSibling(target.getFileName() + ".part");
-            try (OutputStream out = Files.newOutputStream(temp)) {
-                in.transferTo(out);
+        Path temp = target.resolveSibling(target.getFileName() + ".part");
+        try {
+            try (InputStream in = SherpaEngine.class.getResourceAsStream(resource)) {
+                if (in == null) {
+                    throw new IOException("语音包里缺少 " + resource);
+                }
+                try (OutputStream out = Files.newOutputStream(temp)) {
+                    in.transferTo(out);
+                }
             }
             Files.move(temp, target, StandardCopyOption.REPLACE_EXISTING);
+        } catch (Throwable t) {
+            try {
+                Files.deleteIfExists(temp);
+            } catch (Throwable ignored) {
+                // 清理失败无所谓
+            }
+            if (t instanceof IOException io) {
+                throw io;
+            }
+            throw new IOException(t.toString(), t);
         }
     }
 
@@ -533,7 +576,16 @@ final class SherpaEngine {
         if (settingsLoaded) {
             return;
         }
-        settingsLoaded = true;
+        synchronized (SETTINGS_LOCK) {
+            if (settingsLoaded) {
+                return;
+            }
+            loadSettingsLocked();
+        }
+    }
+
+    /** 真正读取设置；只在持有 {@link #SETTINGS_LOCK} 时调用。 */
+    private static void loadSettingsLocked() {
         try {
             Path file = settingsFile();
             if (!Files.isRegularFile(file)) {
@@ -564,6 +616,8 @@ final class SherpaEngine {
             }
         } catch (Throwable t) {
             LOG.warn("读取语音设置失败：{}", t.toString());
+        } finally {
+            settingsLoaded = true;
         }
     }
 
@@ -576,7 +630,7 @@ final class SherpaEngine {
         try {
             Path file = settingsFile();
             Files.createDirectories(file.getParent());
-            Files.writeString(file, "# 语音附加包设置（改完重进游戏生效；游戏里按 B 也能切换对比显示）\n"
+            Files.writeString(file, "# 语音附加包设置（改完重进游戏生效）\n"
                     + "# primary  = paraformer | zipformer   哪一路排在最前面（它的结果优先用来下单）\n"
                     + "# compare  = on | off                 聊天栏里是否多显示另一个模型那一行（两个模型始终都跑）\n"
                     + "# parallel = on | off                 两个模型是否并行跑（关掉就一个接一个，慢但省内存）\n"

@@ -108,6 +108,42 @@ final class VoiceText {
         return null;
     }
 
+    /** 最像的候选（失败时记下「当时最像的是哪一件」，用来判断跨句记忆是不是同一件东西）。 */
+    static Candidate closestCandidate(List<Candidate> candidates, String normalized) {
+        Quantity quantity = findQuantity(normalized);
+        String phrase = normalized;
+        if (quantity != null && quantity.end() < normalized.length()) {
+            phrase = normalized.substring(quantity.end());
+        }
+        Candidate best = null;
+        double bestScore = 0.0D;
+        for (Candidate candidate : candidates) {
+            double score = similarity(phrase, candidate.name());
+            if (score > bestScore) {
+                bestScore = score;
+                best = candidate;
+            }
+        }
+        return best;
+    }
+
+    /**
+     * 别名命中时用：别名只负责定位**物品**，数量必须从这句话里重新解析。
+     *
+     * <p>别名表的键是「含数量的整句」（{@code VoiceAlias.remember} 用归一化后的整句做 key），
+     * 所以别名命中时如果把数量写死成 1，「红色玻璃 12 个」就会永远只取 1 个。
+     */
+    static Match byAlias(Candidate candidate, String normalized, ToIntFunction<String> stackSizeOf) {
+        Quantity quantity = findQuantity(normalized);
+        int unitSize = stackSizeOf == null ? 64 : stackSizeOf.applyAsInt(candidate.id());
+        int count = quantity == null ? 1 : Math.max(1, quantity.value());
+        boolean byStack = quantity != null && quantity.stack() && unitSize > 1;
+        if (byStack) {
+            count = count * unitSize;
+        }
+        return new Match(candidate, count, unitSize, byStack, 1.0D, 1.0D);
+    }
+
     private static void add(List<Match> attempts, List<Candidate> candidates, String phrase, Quantity quantity,
                             ToIntFunction<String> stackSizeOf) {
         Match match = match(candidates, phrase, quantity, stackSizeOf);
@@ -161,6 +197,10 @@ final class VoiceText {
             while (end < text.length()) {
                 char d = text.charAt(end);
                 if (Character.isDigit(d)) {
+                    if (pending > 100_000) {
+                        // 识别出十几位数字时别让 int 溢出（溢出变负会被后面夹成「1 个」）
+                        break;
+                    }
                     pending = pending * 10 + Character.digit(d, 10);
                     any = true;
                     end++;

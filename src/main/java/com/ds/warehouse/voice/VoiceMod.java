@@ -16,14 +16,15 @@ import org.slf4j.LoggerFactory;
  * 加一个语音输入方式 —— 识别在本机离线做，最终仍然是发一条普通的
  * {@code /warehouse order …} 指令，和服务端权限、搬运工流程完全一致。
  *
- * <p>第 1 期到这里为止：注册按键（默认 V，按住说话）+ 采集 + 动作栏反馈。
+ * <p>只注册一个按键（默认 V，按住说话）。「聊天栏里是否多显示另一个模型那一行」由
+ * {@code config/warehouse-keeper-voice/settings.txt} 的 {@code compare=} 控制，不占用任何快捷键 ——
+ * 主体模组默认用 B 打开仓库面板，附加包不再抢这个键。
  */
 public class VoiceMod implements ClientModInitializer {
 
     private static final Logger LOG = LoggerFactory.getLogger("warehouse-keeper-voice");
 
     private static KeyMapping talkKey;
-    private static KeyMapping compareKey;
 
     @Override
     public void onInitializeClient() {
@@ -33,21 +34,8 @@ public class VoiceMod implements ClientModInitializer {
                 InputConstants.KEY_V,
                 KeyMapping.Category.MISC));
 
-        // 对比显示开关：两个模型一样会同时跑，这个键只决定聊天栏里要不要多显示另一个模型那一行。
-        compareKey = KeyMappingHelper.registerKeyMapping(new KeyMapping(
-                "key.warehouse-keeper-voice.compare",
-                InputConstants.Type.KEYBOARD,
-                InputConstants.KEY_B,
-                KeyMapping.Category.MISC));
-
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             VoiceSession.idleTick();
-            if (compareKey != null && compareKey.consumeClick()) {
-                boolean on = SherpaEngine.toggleShowOther();
-                VoiceSession.notify(on
-                        ? "语音对比显示：开（两个模型始终一起跑，多显示另一个模型听到的那一行）"
-                        : "语音对比显示：关（两个模型照样一起跑，只是聊天栏不多显示一行）");
-            }
             if (talkKey == null) {
                 return;
             }
@@ -81,7 +69,7 @@ public class VoiceMod implements ClientModInitializer {
                 if (problem != null) {
                     return;
                 }
-                // 造一段 1.5 秒测试音，把对比模式下另一个模型也真跑一遍（只验证能加载、能解码）
+                // 造一段 1.5 秒测试音，把两个模型都真跑一遍（只验证能加载、能解码）
                 int rate = MicCapture.SAMPLE_RATE;
                 byte[] pcm = new byte[rate * 3];
                 for (int i = 0; i < pcm.length / 2; i++) {
