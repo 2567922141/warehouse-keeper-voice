@@ -1,0 +1,35 @@
+# gradle
+
+.gradle/
+build/
+out/
+classes/
+
+# 本地构建输入：sherpa-onnx 的 Java 绑定、Windows 原生库与中文语音模型（约 400 MB）
+# 全部为可公开下载的文件，由 fetch-libs.ps1 重新获取，不纳入版本控制。
+libs/
+
+# fabric 开发运行目录
+
+run/
+
+# IDE
+
+.idea/
+*.iml
+*.ipr
+*.iws
+.settings/
+.vscode/
+bin/
+.classpath
+.project
+
+# 杂项
+
+*.DS_Store
+*.log
+hs_err_*.log
+replay_*.log
+*.hprof
+*.jfr

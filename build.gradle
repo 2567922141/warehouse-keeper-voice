@@ -1,0 +1,86 @@
+plugins {
+	id 'net.fabricmc.fabric-loom' version "${loom_version}"
+}
+
+version = project.voice_version
+group = project.maven_group
+
+base {
+	archivesName = 'warehouse-keeper-voice'
+}
+
+dependencies {
+	minecraft "com.mojang:minecraft:${project.minecraft_version}"
+	implementation "net.fabricmc:fabric-loader:${project.loader_version}"
+	implementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
+
+	// 离线语音识别：sherpa-onnx 的 Java 绑定（编译期用它，运行期是打进 jar 的那一份）。
+	// 原生库（onnxruntime + jni）与中文模型都随语音包分发，见下面的 sourceSets 与 jar。
+	// libs/ 不进 git（见 .gitignore），用 voice\fetch-libs.ps1 重新获取。
+	implementation files('libs/sherpa-onnx-jvm-1.13.8.jar')
+	// 开发环境也要有一份原生库：SherpaEngine 会从**自己类的 classpath** 里解压
+	// sherpa-onnx/native/win-x64/*.dll，而 jar 任务里的打包只影响发布 jar。
+	implementation files('libs/native-lib-win-x64.jar')
+
+	// 主体模组。语音包只是给玩家「多一个输入法」：它复用主体的客户端类
+	// （名称/id 互查、仓库快照、客户端配置、回显捕获），自己不含任何仓库逻辑。
+	//
+	// 开发期用工程依赖（编译 + 开发环境运行都拿得到主体的类和资源）；
+	// transitive=false 很关键：只要主体的类，不要主体的运行时依赖
+	// （主体 runtimeOnly 的 carpet 等辅助模组在语音包工程里既不需要、也拉不到）。
+	// 发布出去的两个 jar 各自独立：语音包的 fabric.mod.json 只声明
+	// depends warehouse-keeper，既不打包主体，也不会让不装语音包的人有任何变化。
+	implementation(project(':')) { transitive = false }
+}
+
+processResources {
+	def version = project.version
+	inputs.property "version", version
+	filesMatching("fabric.mod.json") {
+		expand "version": version
+	}
+}
+
+sourceSets {
+	main {
+		resources {
+			// 随包分发的中文模型（原样进 jar，首次使用时解压到 config\warehouse-keeper-voice\）：
+			//   sherpa-model-res             → Paraformer 小模型（主模型，最快）
+			//   sherpa-model-res-zipformer   → Zipformer-CTC int8 大模型（对比用，更稳更慢）
+			srcDir 'libs/sherpa-model-res'
+			srcDir 'libs/sherpa-model-res-zipformer'
+		}
+	}
+}
+
+jar {
+	// sherpa-onnx 的 Java 类（com.k2fsa.sherpa.onnx.*）
+	from(zipTree('libs/sherpa-onnx-jvm-1.13.8.jar')) {
+		exclude 'META-INF/**'
+	}
+	// Windows x64 原生库：onnxruntime.dll + sherpa-onnx-jni.dll。
+	// 放在 sherpa-onnx/native/win-x64/ 下，这是 sherpa 自己的 LibraryUtils 约定的查找路径
+	// （它会解压到临时目录并按绝对路径加载，所以不会被系统目录里的旧版 onnxruntime 抢走）。
+	from(zipTree('libs/native-lib-win-x64.jar')) {
+		exclude 'META-INF/**'
+	}
+}
+
+tasks.withType(JavaCompile).configureEach {
+	it.options.release = 25
+	it.options.encoding = 'UTF-8'
+}
+
+// 开发期自检：.\gradlew.bat :voice:runClient -PvoiceSelftest
+// 启动后在后台把识别引擎准备好并打一条日志，用来确认「模型/原生库能加载」（不碰麦克风）。
+tasks.matching { it.name == 'runClient' }.configureEach {
+	if (project.hasProperty('voiceSelftest')) {
+		jvmArgs '-Dwarehousekeeper.voice.selftest=true'
+	}
+}
+
+java {
+	withSourcesJar()
+	sourceCompatibility = JavaVersion.VERSION_25
+	targetCompatibility = JavaVersion.VERSION_25
+}

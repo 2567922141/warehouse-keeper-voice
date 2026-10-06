@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "id": "warehouse-keeper-voice",
+  "version": "${version}",
+  "name": "Warehouse Keeper Voice",
+  "description": "仓库管理（Warehouse Keeper）的可选语音附加包：按一下按键说话（例如「红色玻璃 12 个」），识别成取货指令并派搬运工送货。纯客户端模组，服务端不用装；不装它主体一切照旧。",
+  "authors": [
+    "DS"
+  ],
+  "license": "MIT",
+  "environment": "client",
+  "entrypoints": {
+    "client": [
+      "com.ds.warehouse.voice.VoiceMod"
+    ]
+  },
+  "depends": {
+    "fabricloader": ">=0.19.3",
+    "minecraft": "~26.3",
+    "java": ">=25",
+    "fabric-api": "*",
+    "warehouse-keeper": ">=1.1.4"
+  }
+}

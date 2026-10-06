@@ -1,0 +1,4 @@
+{
+  "key.warehouse-keeper-voice.talk": "Voice pickup (hold to talk, release to recognize)",
+  "key.warehouse-keeper-voice.compare": "Toggle dual voice models (both run, each backs the other up)"
+}
