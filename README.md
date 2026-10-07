@@ -40,6 +40,8 @@ Warehouse Keeper 的可选语音取货附加包。玩家按住指定按键说出
 | [warehouse-keeper（主体包）](https://github.com/2567922141/warehouse-keeper) | 1.1.4 或更高 |
 | 操作系统 | Windows x64（当前仅随包提供 Windows 原生库） |
 
+> 注：该mod暂不适配 Minecraft 26.2
+
 ## 安装
 
 1. 安装主体模组 `warehouse-keeper`（服务端与客户端均需安装）。
