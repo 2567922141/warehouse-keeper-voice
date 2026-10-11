@@ -20,8 +20,14 @@ Warehouse Keeper 的可选语音取货附加包。玩家按住指定按键说出
 ## 功能
 
 - **完全离线识别**：语音识别在本机 CPU 上完成，不联网，不调用任何云服务。
-- **双模型并行**：同时运行两个中文语音识别模型（Paraformer-small 与 Zipformer-CTC-int8），
-  两条识别结果均参与匹配；主模型未能识别物品名时，另一模型的结果自动接续。
+- **可选模型，按需下载**：默认使用 SenseVoice（对多口音、远场、噪声更稳），语音包里另内置
+  Paraformer 中文小模型作兜底（不联网也能用）；也可在设置页换成 Zipformer-CTC 或 Paraformer
+  完整版。模型只从官方源（或其国内镜像）下载，下载后校验大小与 sha256。
+- **多模型接续**：可同时运行主、副两个模型，两条识别结果均参与匹配；主模型未能识别物品名时，
+  另一模型的结果自动接续。
+- **面向近讲/远讲的录音归一化**：录音先做高通滤波（滤掉桌面/空调低频轰鸣），再按「人声段 RMS」
+  归一化（而不是按整段最大电平），并单独判断信噪比；贴着麦克风说与隔着两米说，喂给模型的电平
+  基本一致 —— 这是早期版本「只认某一个人的声音」的主要原因。
 - **面向游戏物品名的匹配**：在仓库实际持有的物品范围内进行闭集匹配，综合字形相似度与拼音
   （含同音与近似音）判定，支持口语化说法与数量单位（个 / 组）。
 - **自动纠错记忆**：经模糊匹配或另一模型纠正成功的说法会写入本机别名表，后续可直接命中；
@@ -45,7 +51,7 @@ Warehouse Keeper 的可选语音取货附加包。玩家按住指定按键说出
 ## 安装
 
 1. 安装主体模组 `warehouse-keeper`（服务端与客户端均需安装）。
-2. 将 `warehouse-keeper-voice-0.1.1.jar` 放入客户端 `mods/` 目录。
+2. 将 `warehouse-keeper-voice-<版本>.jar` 放入客户端 `mods/` 目录。
 3. 服务端无需安装本附加包。
 
 语音下单沿用主体模组的取货权限，需由管理员在仓库面板「权限」页授予该玩家取货权限。
@@ -55,12 +61,16 @@ Warehouse Keeper 的可选语音取货附加包。玩家按住指定按键说出
 | 按键 | 功能 |
 | --- | --- |
 | `V`（按住） | 按住说话，松开后立即识别 |
+| `/warehousevoice` | 打开语音设置页（选模型、下载模型、换镜像、开关对照/并行/预加载） |
+| `/warehousevoice status` | 在聊天栏打印当前语音配置（`/wvoice` 同义） |
 
 聊天栏是否多显示另一个模型那一行，由 `config/warehouse-keeper-voice/settings.txt` 的 `compare=on|off`
 控制（不占用快捷键 —— 主体模组默认用 `B` 打开仓库面板，本附加包不抢这个键）。
 
-首次使用时会随包解压语音模型与原生库至 `config/warehouse-keeper-voice/`（约 450 MB），
-该过程仅执行一次；此后每次启动均在后台预先装载模型。
+首次使用时会随包解压**内置的**语音模型与原生库至 `config/warehouse-keeper-voice/`（约 100 MB），
+该过程仅执行一次；此后每次启动均在后台预先装载模型。更大的模型（SenseVoice 约 228 MB、
+Zipformer-CTC 约 350 MB、Paraformer 完整版约 217 MB）请到设置页里点「下载」，下到
+`config/warehouse-keeper-voice/models/<模型id>/`，与内置模型互不影响。
 
 ## 配置
 
@@ -68,20 +78,30 @@ Warehouse Keeper 的可选语音取货附加包。玩家按住指定按键说出
 
 | 配置项 | 取值 | 说明 |
 | --- | --- | --- |
-| `primary` | `paraformer` / `zipformer` | 优先采用哪个模型的识别结果 |
+| `primary` | `sense-voice` / `paraformer-small` / `zipformer-ctc` / `paraformer-zh` | 优先采用哪个模型的识别结果（默认 `sense-voice`；没下载时自动回退到已装的模型并在聊天栏说明） |
+| `secondary` | 同上，或 `off` | 主模型没听懂时顶上的副模型；`off` 表示只跑主模型 |
 | `compare` | `on` / `off` | 聊天栏是否显示另一模型的结果（不影响两个模型同时运行） |
 | `parallel` | `on` / `off` | 两个模型是否并行识别 |
 | `preload` | `on` / `off` | 启动后是否在后台预先装载模型 |
+| `mirror` | 网址 | 下载模型用的镜像根地址，默认 `https://hf-mirror.com` |
+
+老写法仍然认：`primary=paraformer` 等价于 `paraformer-small`，`zipformer` 等价于 `zipformer-ctc`。
 
 别名表：`config/warehouse-keeper-voice/aliases.txt`，每行格式为 `听到的说法=物品id`，
 例如 `鞍山人=minecraft:andesite`。手工修改与自动记录的内容同存于此文件。
+自动记录的**键只含物品名、不含数量**（「十个金币」记成 `金币`），所以换个数量的说法同样命中；
+只有一两个字的退化说法（例如恰好归一化成「给」「给我」）不再写入别名表 —— 旧版本留下的这类
+条目会在加载时自动剔除，原文备份为同目录下的 `aliases.txt.bak`。
 
 ## 隐私
 
-- 语音识别完全在本机完成，不进行任何网络通信。
+- 语音识别完全在本机完成；识别过程中不进行任何网络通信。
+- 联网只发生在**玩家在设置页里主动点「下载模型」**时（从官方源或所选镜像下载模型文件）；
+  不下载时，游戏进程不产生任何本附加包发起的请求。
 - 录音数据仅以内存缓冲区形式存在，识别结束后立即清零，不写入磁盘。
 - 识别文本仅显示于本机动作栏与聊天栏，不发送至服务器或其他玩家。
-- 运行时写入磁盘的内容仅限 `config/warehouse-keeper-voice/` 下的模型、设置与别名文件。
+- 运行时写入磁盘的内容仅限 `config/warehouse-keeper-voice/` 下的模型、设置与别名文件；
+  绝不写入任何世界存档目录。
 
 ## 构建
 
@@ -92,12 +112,13 @@ git clone https://github.com/2567922141/warehouse-keeper.git
 cd warehouse-keeper
 git checkout 26.3
 # 将本仓库内容放入 voice/ 目录
-powershell -ExecutionPolicy Bypass -File voice/fetch-libs.ps1   # 获取本地构建输入（约 400 MB）
+powershell -ExecutionPolicy Bypass -File voice/fetch-libs.ps1   # 获取本地构建输入（约 90 MB）
 ./gradlew :voice:build
 ```
 
-产物为 `voice/build/libs/warehouse-keeper-voice-<版本>.jar`。该 jar 内含两个语音模型与
-Windows x64 原生库，体积约 357 MB；`voice/libs/` 为本地构建输入，不纳入版本控制。
+产物为 `voice/build/libs/warehouse-keeper-voice-<版本>.jar`。该 jar 内含内置的 Paraformer 中文小模型
+与 Windows x64 原生库，体积约 90 MB；更大的模型（SenseVoice、Zipformer-CTC、Paraformer 完整版）
+**不随包分发**，由玩家在语音设置页里按需下载。`voice/libs/` 为本地构建输入，不纳入版本控制。
 
 ## 第三方组件
 
@@ -107,8 +128,10 @@ Windows x64 原生库，体积约 357 MB；`voice/libs/` 为本地构建输入�
 | --- | --- | --- |
 | sherpa-onnx（Java 绑定与原生库） | [k2-fsa/sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) | Apache-2.0 |
 | ONNX Runtime | [microsoft/onnxruntime](https://github.com/microsoft/onnxruntime) | MIT |
-| Paraformer 中文小模型 | k2-fsa/sherpa-onnx asr-models | 见上游 |
-| Zipformer-CTC 中文 int8 模型 | k2-fsa/sherpa-onnx asr-models | 见上游 |
+| Paraformer 中文小模型（**随包内置**） | k2-fsa/sherpa-onnx asr-models | 见上游 |
+| SenseVoice（设置页按需下载） | [csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17](https://huggingface.co/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17) | 见上游 |
+| Zipformer-CTC 中文 int8 模型（按需下载） | [csukuangfj/sherpa-onnx-zipformer-ctc-zh-int8-2025-07-03](https://huggingface.co/csukuangfj/sherpa-onnx-zipformer-ctc-zh-int8-2025-07-03) | 见上游 |
+| Paraformer 中文完整版（按需下载） | [csukuangfj/sherpa-onnx-paraformer-zh-2024-03-09](https://huggingface.co/csukuangfj/sherpa-onnx-paraformer-zh-2024-03-09) | 见上游 |
 
 ## 许可证
 
