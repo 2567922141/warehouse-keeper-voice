@@ -26,8 +26,6 @@ final class VoiceSession {
     private static final long MAX_MS = 15_000L;
     /** 太短当误触。 */
     private static final long MIN_MS = 300L;
-    /** 整段最大电平低于这个数，就认为没收到声音。 */
-    private static final int SILENT_RAW = 300;
 
     private static MicCapture capture;
     private static long startedAt;
@@ -49,12 +47,20 @@ final class VoiceSession {
 
     /** 每个客户端 tick 调一次：玩家已经进了世界，就把攒下的提示弹出来（只弹一次）。 */
     static void idleTick() {
-        String pending = pendingReady;
-        if (pending == null || pending.isEmpty() || Minecraft.getInstance().player == null) {
+        if (Minecraft.getInstance().player == null) {
             return;
         }
-        pendingReady = "";
-        notify(pending);
+        String pending = pendingReady;
+        if (pending != null && !pending.isEmpty()) {
+            pendingReady = "";
+            notify(pending);
+        }
+        // 引擎攒下的提示（例如「选的主模型还没下载，先用兜底模型」）也在这里弹一次，
+        // 免得玩家在语音设置里选了没下载的模型之后，以为整个语音功能坏了。
+        String extra = SherpaEngine.consumeNotice();
+        if (!extra.isEmpty()) {
+            notify(extra);
+        }
     }
 
     static boolean recording() {
@@ -142,11 +148,8 @@ final class VoiceSession {
             overlay("太短了（" + seconds(ms) + " 秒），当误触忽略");
             return;
         }
-        if (current.maxRaw() < SILENT_RAW) {
-            current.wipe();
-            overlay("没收到声音（最大电平 " + current.maxRaw() + "／32767）——检查麦克风是否被其他程序独占，或设成了静音");
-            return;
-        }
+        // 「有没有声音」不再只看整段最大电平（那会把远处的轻声判成没说话），
+        // 交给引擎做体检：高通 + 噪声底 + 信噪比，不合格时给出人话原因。
         recognize(current);
     }
 
@@ -164,6 +167,17 @@ final class VoiceSession {
             overlay("没录到音频，请再试一次");
             return;
         }
+        // 先在主线程做一次体检（只过滤/统计，不碰模型，几毫秒的事）：太轻、太远、只有环境噪声时
+        // 立刻告诉玩家具体原因，而不是等模型跑完再听到一句含糊的「没听清」。
+        SherpaEngine.Prepared prepared = SherpaEngine.analyzePrepared(pcm, length);
+        SherpaEngine.Audio audio = prepared.audio();
+        if (!audio.usable()) {
+            Arrays.fill(pcm, (byte) 0);
+            current.wipe();
+            overlay(audio.problem());
+            LOG.info("录音没通过体检：{}（{}）", audio.problem(), audio.detail());
+            return;
+        }
         recognizing = true;
         overlay("识别中…");
         Thread worker = new Thread(() -> {
@@ -173,7 +187,7 @@ final class VoiceSession {
             try {
                 problem = SherpaEngine.prepare();
                 if (problem == null) {
-                    lines = SherpaEngine.transcribe(pcm, length);
+                    lines = SherpaEngine.transcribe(prepared);
                 }
             } catch (Throwable t) {
                 problem = t.getClass().getSimpleName() + "：" + t.getMessage();

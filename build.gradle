@@ -41,18 +41,6 @@ processResources {
 	}
 }
 
-sourceSets {
-	main {
-		resources {
-			// 随包分发的中文模型（原样进 jar，首次使用时解压到 config\warehouse-keeper-voice\）：
-			//   sherpa-model-res             → Paraformer 小模型（主模型，最快）
-			//   sherpa-model-res-zipformer   → Zipformer-CTC int8 大模型（对比用，更稳更慢）
-			srcDir 'libs/sherpa-model-res'
-			srcDir 'libs/sherpa-model-res-zipformer'
-		}
-	}
-}
-
 jar {
 	// sherpa-onnx 的 Java 类（com.k2fsa.sherpa.onnx.*）
 	from(zipTree('libs/sherpa-onnx-jvm-1.13.8.jar')) {

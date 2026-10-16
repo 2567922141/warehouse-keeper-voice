@@ -20,9 +20,11 @@ Warehouse Keeper 的可选语音取货附加包。玩家按住指定按键说出
 ## 功能
 
 - **完全离线识别**：语音识别在本机 CPU 上完成，不联网，不调用任何云服务。
-- **可选模型，按需下载**：默认使用 SenseVoice（对多口音、远场、噪声更稳），语音包里另内置
-  Paraformer 中文小模型作兜底（不联网也能用）；也可在设置页换成 Zipformer-CTC 或 Paraformer
-  完整版。模型只从官方源（或其国内镜像）下载，下载后校验大小与 sha256。
+- **模型全部按需下载**：**语音包不内置任何模型**（包体约 8 MB，只有引擎），四个模型都在设置页里
+  自己选、自己下：SenseVoice（默认，约 228 MB，对多口音、远场、噪声更稳）、Paraformer 小
+  （约 78 MB，最省 CPU 与内存）、Zipformer-CTC（约 350 MB）、Paraformer 完整版（约 217 MB）。
+  模型从 `huggingface.co` 下载（设置页另一个入口 `hf-mirror.com` 只是转发到同一个站，
+  不是独立源），支持断点续传，下载后校验大小与 sha256。
 - **多模型接续**：可同时运行主、副两个模型，两条识别结果均参与匹配；主模型未能识别物品名时，
   另一模型的结果自动接续。
 - **面向近讲/远讲的录音归一化**：录音先做高通滤波（滤掉桌面/空调低频轰鸣），再按「人声段 RMS」
@@ -67,10 +69,10 @@ Warehouse Keeper 的可选语音取货附加包。玩家按住指定按键说出
 聊天栏是否多显示另一个模型那一行，由 `config/warehouse-keeper-voice/settings.txt` 的 `compare=on|off`
 控制（不占用快捷键 —— 主体模组默认用 `B` 打开仓库面板，本附加包不抢这个键）。
 
-首次使用时会随包解压**内置的**语音模型与原生库至 `config/warehouse-keeper-voice/`（约 100 MB），
-该过程仅执行一次；此后每次启动均在后台预先装载模型。更大的模型（SenseVoice 约 228 MB、
-Zipformer-CTC 约 350 MB、Paraformer 完整版约 217 MB）请到设置页里点「下载」，下到
-`config/warehouse-keeper-voice/models/<模型id>/`，与内置模型互不影响。
+首次使用时会把随包附带的原生库解压到 `config/warehouse-keeper-voice/`（约 8 MB），该过程仅执行一次。
+**语音模型不随包分发**：输入 `/warehousevoice` 打开设置页，在想要的模型那一行点「下载」，
+模型落在 `config/warehouse-keeper-voice/models/<模型id>/`；下载完成后自动可用，一个都没下载时
+按住 `V` 会提示先去设置页下载一个。
 
 ## 配置
 
@@ -112,27 +114,23 @@ git clone https://github.com/2567922141/warehouse-keeper.git
 cd warehouse-keeper
 git checkout 26.3
 # 将本仓库内容放入 voice/ 目录
-# 手工放置两个本地构建输入（约 8 MB，libs/ 不纳入版本控制）：
-#   libs/sherpa-onnx-jvm-1.13.8.jar
-#       https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.8/sherpa-onnx-jvm-1.13.8.jar
-#   libs/native-lib-win-x64.jar
-#       https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.8/sherpa-onnx-native-lib-win-x64-1.13.8.jar
+powershell -ExecutionPolicy Bypass -File voice/fetch-libs.ps1   # 获取本地构建输入（约 8 MB）
 ./gradlew :voice:build
 ```
 
-产物为 `voice/build/libs/warehouse-keeper-voice-<版本>.jar`。该 jar 内含内置的 Paraformer 中文小模型
-与 Windows x64 原生库，体积约 90 MB；更大的模型（SenseVoice、Zipformer-CTC、Paraformer 完整版）
-**不随包分发**，由玩家在语音设置页里按需下载。`voice/libs/` 为本地构建输入，不纳入版本控制。
+产物为 `voice/build/libs/warehouse-keeper-voice-<版本>.jar`，体积约 8 MB：只含 sherpa-onnx 的 Java
+绑定与 Windows x64 原生库，**不含任何语音模型** —— 模型由玩家在语音设置页里按需下载。
+`voice/libs/` 为本地构建输入，不纳入版本控制。
 
 ## 第三方组件
 
-随发行包分发的组件及其来源：
+随发行包分发的组件，以及设置页里可下载的模型：
 
 | 组件 | 来源 | 许可 |
 | --- | --- | --- |
 | sherpa-onnx（Java 绑定与原生库） | [k2-fsa/sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) | Apache-2.0 |
 | ONNX Runtime | [microsoft/onnxruntime](https://github.com/microsoft/onnxruntime) | MIT |
-| Paraformer 中文小模型（**随包内置**） | k2-fsa/sherpa-onnx asr-models | 见上游 |
+| Paraformer 中文小模型（设置页按需下载） | k2-fsa/sherpa-onnx asr-models | 见上游 |
 | SenseVoice（设置页按需下载） | [csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17](https://huggingface.co/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17) | 见上游 |
 | Zipformer-CTC 中文 int8 模型（按需下载） | [csukuangfj/sherpa-onnx-zipformer-ctc-zh-int8-2025-07-03](https://huggingface.co/csukuangfj/sherpa-onnx-zipformer-ctc-zh-int8-2025-07-03) | 见上游 |
 | Paraformer 中文完整版（按需下载） | [csukuangfj/sherpa-onnx-paraformer-zh-2024-03-09](https://huggingface.co/csukuangfj/sherpa-onnx-paraformer-zh-2024-03-09) | 见上游 |

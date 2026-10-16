@@ -23,7 +23,7 @@ final class VoiceText {
     /** 「明显领先」的差距。 */
     static final double MARGIN = 0.15D;
     /** 拼音相似度至少要这么高才算数（太低说明只是碰巧押韵，不能下单）。 */
-    static final double PINYIN_MIN = 0.60D;
+    static final double PINYIN_MIN = 0.55D;
 
     /** 中文数字。 */
     private static final Map<Character, Integer> DIGITS = Map.ofEntries(
@@ -59,17 +59,69 @@ final class VoiceText {
     /** 去掉空白、口水词与「的」（「红色的玻璃」→「红色玻璃」）。 */
     static String normalize(String heard) {
         String text = heard == null ? "" : heard.replaceAll("\\s+", "");
+        return stripFillers(text, false).replace("的", "");
+    }
+
+    /**
+     * 剥掉开头的口水词 / 动词。
+     *
+     * @param aggressive {@code false}：整句就是一个口水词时**保留**它（「给我」原样留着，
+     *                   免得归一化之后变成空串让玩家看到「没听清」）；{@code true}：连它一起剥掉
+     *                   （判断"这句话有没有实物名"时用 —— 「给我」不该算一个物品名）
+     */
+    private static String stripFillers(String text, boolean aggressive) {
         boolean changed = true;
         while (changed) {
             changed = false;
             for (String filler : FILLERS) {
-                if (text.startsWith(filler) && text.length() > filler.length()) {
+                if (text.startsWith(filler) && (aggressive || text.length() > filler.length())) {
                     text = text.substring(filler.length());
                     changed = true;
                 }
             }
         }
-        return text.replace("的", "");
+        return text;
+    }
+
+    /**
+     * 从归一化后的口语句子里挖出**物品名部分**：去掉口水词、数量与量词。
+     *
+     * <p>别名表用这个当键（见 {@code VoiceAlias}）。用整句当键的话，「十个金币」学到的教训
+     * 对「五个金币」一点用都没有；挖掉数量之后，同一件东西的各种说法才会落到同一个键上。
+     */
+    static String itemPhrase(String normalized) {
+        String text = normalized == null ? "" : normalized.replace("的", "");
+        text = stripFillers(text, true);
+        Quantity quantity = findQuantity(text);
+        if (quantity != null) {
+            String tail = text.substring(quantity.end);
+            String head = text.substring(0, quantity.start);
+            // 和 best() 一样：数量通常夹在中间，取更长的那一侧当物品名
+            text = tail.length() >= head.length() ? tail : head;
+            text = stripFillers(text, true);
+        }
+        // 识别经常把开头的「一」吃掉，只剩一个孤零零的量词（「个不祥之品」）：这种一律丢掉
+        while (text.length() >= 3 && UNITS.indexOf(text.charAt(0)) >= 0) {
+            text = text.substring(1);
+        }
+        return text.trim();
+    }
+
+    /**
+     * 这句话里有没有「实物名」成分：挖掉口水词、数量与量词后还剩至少两个字。
+     *
+     * <p>这是别名表的卫生门槛：「给」「给我」「一根」这种整句只剩口水词/量词的退化说法
+     * 一律不许记住 —— 否则任何人只要说出恰好归一化成「给」的两个字，就会被自动下单。
+     */
+    static boolean hasSubstance(String normalized) {
+        String phrase = itemPhrase(normalized);
+        int letters = 0;
+        for (int i = 0; i < phrase.length(); i++) {
+            if (Character.isLetter(phrase.charAt(i))) {
+                letters++;
+            }
+        }
+        return letters >= 2;
     }
 
     /**
@@ -130,8 +182,8 @@ final class VoiceText {
     /**
      * 别名命中时用：别名只负责定位**物品**，数量必须从这句话里重新解析。
      *
-     * <p>别名表的键是「含数量的整句」（{@code VoiceAlias.remember} 用归一化后的整句做 key），
-     * 所以别名命中时如果把数量写死成 1，「红色玻璃 12 个」就会永远只取 1 个。
+     * <p>别名表的键是「物品名部分」（{@code VoiceAlias.remember} 用 {@link #itemPhrase} 挖掉数量与
+     * 口水词之后当 key），数量不在键里，所以必须现算 —— 否则「红色玻璃 12 个」会永远只取 1 个。
      */
     static Match byAlias(Candidate candidate, String normalized, ToIntFunction<String> stackSizeOf) {
         Quantity quantity = findQuantity(normalized);

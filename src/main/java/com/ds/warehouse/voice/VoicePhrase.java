@@ -134,7 +134,7 @@ final class VoicePhrase {
         }
         // ① 先查别名表（自动记住的 + 玩家手写的），命中就直接用——这样「以后才会出现的偏差」
         //    只要被纠正过一次，之后就一直是对的。别名只负责**定位物品**，数量仍从这句话里解析
-        //    （别名键是含数量的整句，写死 1 会让「12 个」永远只取 1 个）。
+        //    （别名键只含物品名，不含数量；数量永远从这一句里现算）。
         VoiceText.Match match = null;
         String aliasId = VoiceAlias.lookup(text);
         if (aliasId != null) {
@@ -160,8 +160,9 @@ final class VoicePhrase {
                     + String.join(" / ", VoiceText.closestNames(candidates, text, 3))
                     + "；说对一次我就会记住");
         }
-        // 靠模糊匹配救回来的（不是完全命中）就记进别名表，下次直接命中
-        if (commit && match.score() < 0.95D) {
+        // 靠模糊匹配救回来、而且**匹配得比较有把握**（达到 STRONG）才记进别名表。
+        // 只在 WEAK 档勉强够线的那种（0.35~0.55）不记：猜错了会永久绑错物品，比不记更糟。
+        if (commit && match.score() >= VoiceText.STRONG && match.score() < 0.95D) {
             VoiceAlias.remember(heard, match.candidate().id());
         }
         // 上一句没听出来、这一句说对了，**且两次指的是同一件东西**时，才把上一句的错法也记住。

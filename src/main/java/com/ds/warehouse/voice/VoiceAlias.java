@@ -17,8 +17,11 @@ import java.util.Map;
  *
  * <p>两个来源：
  * <ul>
- *     <li><b>自动记住</b>：某句听错但被模糊匹配救回来时（相似度不高），把这句原话和它最终对应
- *         的物品写进表里；下次同一句（哪怕是同样的错法）直接命中，不用再猜。</li>
+ *     <li><b>自动记住</b>：某句听错但被模糊匹配救回来时（相似度够高），把这句里的**物品名部分**
+ *         和它最终对应的物品写进表里；下次同一件东西的任何说法直接命中，不用再猜。
+ *         键只用物品名（挖掉「十个」「一组」这类数量与口水词），所以「十个金币」的教训对
+ *         「五个金币」也生效；整句只剩口水词/量词的退化说法（「给」「给我」「一根」）一律不记，
+ *         否则说出一两个字就会被自动下单（0.1.0 时代留下的脏键由 {@link #load()} 清掉并备份）。</li>
  *     <li><b>玩家手改</b>：表就在 {@code config/warehouse-keeper-voice/aliases.txt}，
  *         一行 {@code 听到的说法=物品id}，改完重进游戏生效。以后遇到任何我没想到的口音/说法，
  *         自己加一行就行，不用等我改版本。</li>
@@ -39,15 +42,36 @@ final class VoiceAlias {
     private VoiceAlias() {
     }
 
-    /** 按「听到的说法」查物品 id；查不到返回 null。 */
+    /**
+     * 按「听到的说法」查物品 id；查不到返回 null。
+     *
+     * <p>先拿整句查（玩家手写的、以及老版本记下的整句键都还在这里），查不到再用**物品名部分**
+     * 查一次 —— 自动记住的键都只含物品名，所以「十个金币」学到的教训对「五个金币」也生效。
+     */
     static synchronized String lookup(String normalizedHeard) {
-        return load().get(normalizedHeard);
+        Map<String, String> table = load();
+        String direct = table.get(normalizedHeard);
+        if (direct != null) {
+            return direct;
+        }
+        String phrase = VoiceText.itemPhrase(normalizedHeard);
+        if (!phrase.equals(normalizedHeard)) {
+            return table.get(phrase);
+        }
+        return null;
     }
 
     /** 记住一条：heard 是识别原话（会做同样的归一化），itemId 是仓库里真实存在的物品。 */
     static synchronized void remember(String heard, String itemId) {
-        String key = VoiceText.normalize(heard);
-        if (key.isEmpty() || itemId == null || itemId.isEmpty()) {
+        String key = VoiceText.itemPhrase(VoiceText.normalize(heard));
+        if (itemId == null || itemId.isEmpty()) {
+            return;
+        }
+        // 卫生门槛：整句只剩口水词/量词的退化说法（「给」「给我」「一根」）一律不记 ——
+        // 0.1.0 时代把它们写进过别名表，结果任何人说出对应的一两个字就会被自动下单。
+        // 老文件里的这类脏键由 load() 清掉（见 migrate）。
+        if (!VoiceText.hasSubstance(key)) {
+            LOG.info("这句话里没有物品名成分（{} 个字），不记别名", key.length());
             return;
         }
         Map<String, String> table = load();
@@ -67,6 +91,7 @@ final class VoiceAlias {
         }
         Map<String, String> loaded = new LinkedHashMap<>();
         Path file = file();
+        int spoiled = 0;
         try {
             if (Files.isRegularFile(file)) {
                 for (String raw : Files.readAllLines(file, StandardCharsets.UTF_8)) {
@@ -80,15 +105,39 @@ final class VoiceAlias {
                     }
                     String key = VoiceText.normalize(line.substring(0, eq));
                     String value = line.substring(eq + 1).trim();
-                    if (!key.isEmpty() && !value.isEmpty()) {
-                        loaded.put(key, value);
+                    if (key.isEmpty() || value.isEmpty()) {
+                        continue;
                     }
+                    if (!VoiceText.hasSubstance(key)) {
+                        spoiled++;
+                        LOG.info("丢弃一条退化别名（没有物品名成分）：{} 个字", key.length());
+                        continue;
+                    }
+                    loaded.put(key, value);
+                    // 老键带着数量（「十个金币」）：再按物品名部分收一条，让它对别的数量也生效
+                    String phrase = VoiceText.itemPhrase(key);
+                    if (!phrase.isEmpty() && !phrase.equals(key) && VoiceText.hasSubstance(phrase)) {
+                        loaded.putIfAbsent(phrase, value);
+                    }
+                }
+                if (spoiled > 0) {
+                    // 清掉的键先留个备份再重写文件：玩家的手写内容绝不无声消失
+                    Path backup = file.resolveSibling("aliases.txt.bak");
+                    if (!Files.isRegularFile(backup)) {
+                        Files.copy(file, backup);
+                    }
+                    LOG.warn("别名表里有 {} 条退化键（说出一两个字就会被下单），已移除；原文备份在 {}",
+                            spoiled, backup);
+                    dirty = true;
                 }
             }
         } catch (Throwable t) {
             LOG.warn("读取语音别名表失败：{}", t.toString());
         }
         map = loaded;
+        if (dirty) {
+            save(loaded);
+        }
         return map;
     }
 
