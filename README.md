@@ -112,7 +112,11 @@ git clone https://github.com/2567922141/warehouse-keeper.git
 cd warehouse-keeper
 git checkout 26.3
 # 将本仓库内容放入 voice/ 目录
-powershell -ExecutionPolicy Bypass -File voice/fetch-libs.ps1   # 获取本地构建输入（约 90 MB）
+# 手工放置两个本地构建输入（约 8 MB，libs/ 不纳入版本控制）：
+#   libs/sherpa-onnx-jvm-1.13.8.jar
+#       https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.8/sherpa-onnx-jvm-1.13.8.jar
+#   libs/native-lib-win-x64.jar
+#       https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.8/sherpa-onnx-native-lib-win-x64-1.13.8.jar
 ./gradlew :voice:build
 ```
 
