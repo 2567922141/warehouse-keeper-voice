@@ -34,6 +34,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.function.ToIntFunction;
 
 /**
  * 离线语音识别：sherpa-onnx + 可自由选择的模型，同一句话可以让**两个模型**各跑一遍。
@@ -54,7 +55,7 @@ import java.util.concurrent.Future;
  * <p>设置写在 {@code config/warehouse-keeper-voice/settings.txt}（第一次运行自动生成，
  * 也可以在语音设置页里点着改）：{@code primary} / {@code secondary} 选模型，{@code compare} 决定
  * 聊天栏里要不要多显示副模型那一行，{@code parallel} 是否并行，{@code preload} 是否进游戏后台预装，
- * {@code mirror} 是下载模型用的镜像地址。
+ * {@code mirrorMode} 选下载源（官方 / hf-mirror / 魔搭 / 自动 / 自定义）、{@code mirror} 是自定义前缀。
  *
  * <p>模型与原生库只在**第一次**解压/下载到硬盘（{@code config/warehouse-keeper-voice/}），
  * 之后每次都直接调用硬盘上的文件（大小对不上才重新弄），进游戏时后台预装。
@@ -116,6 +117,25 @@ final class SherpaEngine {
     private static final double NOISE_FLOOR = 6.0D;
     /** 一阶高通截止频率：滤掉直流偏移与桌面/空调的低频轰鸣，它们白占峰值和增益预算。 */
     private static final double HIGHPASS_HZ = 70.0D;
+    /**
+     * V-06：判定「是不是低频轰鸣盖住了人声」用的低通截止频率（两级一阶低通）。
+     *
+     * <p>取 200 Hz：交流声（50/60 Hz）与低次谐波（100/120 Hz）、风扇与变压器的低频嗡鸣都在下面，
+     * 而人声虽然基频也低（普通话大约 100~300 Hz），却带大量 1 kHz 以上的谐波 —— 所以两者的
+     * 「低频占总能量之比」分得很开（实测见 {@link #RUMBLE_RATIO}）。
+     */
+    private static final double RUMBLE_HZ = 200.0D;
+    /**
+     * V-06：低频能量占比超过这个数，就认为「拒收的原因是低频轰鸣」而不是「说话太轻」。
+     *
+     * <p>0.60 取在两簇实测值的中间（2026-10-16，48 kHz 合成信号 + 本类真实判据）：被拒的
+     * 低频轰鸣（30/50/60/100/120 Hz 纯音、以及轻音叠加 50 Hz 轰鸣）占比 0.735~0.978；
+     * 被拒的宽带白噪声 0.080 —— 中间没有任何样本，所以这个门限不敏感。
+     *
+     * <p>更要紧的是它**只在「信噪比不达标、本来就要拒收」的分支里**参与判断：能通过的录音
+     * （占比 0.17~0.66）根本走不到这里，所以它不可能把一段本来能用的录音挡掉。
+     */
+    private static final double RUMBLE_RATIO = 0.60D;
     /** 统计电平用的帧长（20 毫秒）。 */
     private static final int FRAME_SAMPLES = MicCapture.SAMPLE_RATE / 50;
     /** 掐头去尾各留的余量（150 毫秒），避免把首尾音素切掉。 */
@@ -196,11 +216,40 @@ final class SherpaEngine {
     private static volatile boolean showOther = true;
     private static volatile boolean parallel = true;
     private static volatile boolean preload = true;
+    /** 下载源模式（{@link VoiceMirrors} 里的 id），默认官方原始源。 */
+    private static volatile String mirrorMode = VoiceMirrors.DEFAULT_MODE;
+    /**
+     * 自定义下载前缀：只有 {@link VoiceMirrors#CUSTOM} 模式下才参与拼地址。
+     *
+     * <p>老设置文件只有这个键（没有 {@code mirrorMode=}），所以读取时按地址反推模式，
+     * 见 {@link #loadSettingsLocked()}。
+     */
     private static volatile String mirror = VoiceModelCatalog.defaultMirror();
     /** 攒下来给玩家的一句提示（例如「还没有可用的语音模型，先去设置页下载一个」），由 VoiceSession 取走显示。 */
     private static volatile String notice = "";
     private static volatile boolean preloadStarted;
     private static volatile boolean settingsLoaded;
+
+    // ---- AI 口语归一化（第 ② 步，见 {@link VoiceRewrite}）：默认全关，关着时一个字节都不出网 ----
+
+    /** 总开关，默认 off。 */
+    private static volatile boolean rewrite;
+    /** 改写方式（{@link VoiceRewrite#modeIds()}）；默认 both = 本地优先、本地没把握才问 AI。 */
+    private static volatile String rewriteMode = VoiceRewrite.MODE_BOTH;
+    /** 预设服务商 id（{@link VoiceRewrite#presetIds()}）；空/认不出 = {@link VoiceRewrite#defaultPresetId()}。 */
+    private static volatile String rewritePreset = "";
+    /**
+     * 接口地址；空 = 用当前预设的默认地址。
+     *
+     * <p>大小写敏感，所以存的是原文 —— 和 {@link #mirror} 一个道理。
+     */
+    private static volatile String rewriteUrl = "";
+    /** 模型名；空 = 用当前预设的默认模型。 */
+    private static volatile String rewriteModel = "";
+    /** API Key：**明文**存在 settings.txt 里（和 primary/mirror 同一份文件），界面只显示前 4 位。 */
+    private static volatile String rewriteKey = "";
+    /** 超时毫秒，默认 {@link VoiceRewrite#DEFAULT_TIMEOUT_MS}，夹在 500–3000。 */
+    private static volatile int rewriteTimeout = VoiceRewrite.DEFAULT_TIMEOUT_MS;
 
     private SherpaEngine() {
     }
@@ -406,9 +455,22 @@ final class SherpaEngine {
         return secondaryKey;
     }
 
-    static String mirror() {
+    /** 当前下载源模式 id（{@code official} / {@code hfm} / {@code modelscope} / {@code auto} / {@code custom}）。 */
+    static String mirrorMode() {
         loadSettings();
-        return mirror;
+        return mirrorMode;
+    }
+
+    /** 界面上显示用的下载源名（自定义模式带前缀），不要用它去拼地址。 */
+    static String mirrorLabel() {
+        loadSettings();
+        return VoiceMirrors.describe(mirrorMode, mirror);
+    }
+
+    /** 当前模式下这个模型会不会被回退（魔搭没镜像时给玩家一句实话）；不会则返回 null。 */
+    static String mirrorFallback(VoiceModel model) {
+        loadSettings();
+        return VoiceMirrors.fallbackReason(mirrorMode, model);
     }
 
     static boolean compareOn() {
@@ -456,15 +518,173 @@ final class SherpaEngine {
         preload = value;
     }
 
-    static void setMirror(String url) {
-        if (url != null && !url.isBlank()) {
-            mirror = url.trim();
+    /** 换下载源：认得出才改，认不出保持原样（不静默改成默认值，免得错别字悄悄换源）。 */
+    static void setMirrorMode(String mode) {
+        String canonical = VoiceMirrors.canonical(mode);
+        if (canonical != null) {
+            mirrorMode = canonical;
         }
     }
 
+    // ------------------------------------------------------------------ AI 口语归一化（第 ② 步）
+
+    /**
+     * 总开关。默认 off，关着时 {@link VoiceSession} 连 {@link VoiceRewrite#rewrite} 都不会调 ——
+     * 一个字节都不出网。
+     */
+    static boolean rewriteOn() {
+        loadSettings();
+        return rewrite;
+    }
+
+    /** 预设服务商 id；没设过时给默认（智谱 BigModel）。 */
+    static String rewritePreset() {
+        loadSettings();
+        return VoiceRewrite.preset(rewritePreset).id();
+    }
+
+    /** 玩家填的接口地址；没填过时给当前预设的默认地址。 */
+    static String rewriteUrl() {
+        loadSettings();
+        return VoiceRewrite.url(rewritePreset, rewriteUrl);
+    }
+
+    /** 当前真正会用的模型名。 */
+    static String rewriteModel() {
+        loadSettings();
+        return VoiceRewrite.model(rewritePreset, rewriteModel, null).model();
+    }
+
+    /**
+     * 模型名是不是「跟当前预设搭得上」。
+     *
+     * <p>用途只有一个：设置页在「自定义」里填了个跟地址对不上的模型时提前说一句人话，
+     * 而不是等服务端回 400。**不拦保存**，也不当成错误。
+     */
+    static boolean rewriteModelLooksValid() {
+        loadSettings();
+        return VoiceRewrite.model(rewritePreset, rewriteModel, null).valid();
+    }
+
+    /** 玩家填的 API Key 原文。**不要在玩家可见的文字里直接显示它**，要显示就走 {@link VoiceRewrite#maskKey}。 */
+    static String rewriteKey() {
+        loadSettings();
+        return rewriteKey;
+    }
+
+    /** 一次请求的超时毫秒（已夹在 500–3000）。 */
+    static int rewriteTimeout() {
+        loadSettings();
+        return VoiceRewrite.clampTimeout(rewriteTimeout);
+    }
+
+    /** 服务商是不是本机服务（Ollama）：本地服务不用填 key。 */
+    static boolean rewriteLocal() {
+        loadSettings();
+        return VoiceRewrite.preset(rewritePreset).local();
+    }
+
+    /**
+     * 改写方式：{@link VoiceRewrite#MODE_BOTH}（默认，本地优先）/ {@link VoiceRewrite#MODE_LOCAL}
+     * （完全本地，一次都不问 AI）/ {@link VoiceRewrite#MODE_AI}（每句先问 AI）。
+     *
+     * <p>只在总开关 {@link #rewriteOn()} 为 true 时有意义：开关关着时任何方式都不出网。
+     */
+    static String rewriteMode() {
+        loadSettings();
+        return rewriteMode;
+    }
+
+    /** 给玩家看的改写方式名字，例如「两个一起（本地优先）」。 */
+    static String rewriteModeLabel() {
+        loadSettings();
+        return VoiceRewrite.modeLabel(rewriteMode);
+    }
+
+    /** 改改写方式：认得出才改（认不出的值保持原样，免得错别字悄悄换模式）。 */
+    static void setRewriteMode(String id) {
+        String canonical = VoiceRewrite.canonicalMode(id);
+        if (canonical != null) {
+            rewriteMode = canonical;
+        }
+    }
+
+    static void setRewrite(boolean value) {
+        rewrite = value;
+    }
+
+    /** 换服务商：认得出才改；认不出（空串除外）保持原样，免得错别字悄悄换服务。 */
+    static void setRewritePreset(String id) {
+        String wanted = id == null ? "" : id.trim();
+        if (wanted.isEmpty()) {
+            rewritePreset = "";
+            return;
+        }
+        VoiceRewrite.Preset found = VoiceRewrite.findPreset(wanted);
+        if (found != null) {
+            rewritePreset = found.id();
+        }
+    }
+
+    static void setRewriteUrl(String url) {
+        rewriteUrl = url == null ? "" : url.trim();
+    }
+
+    static void setRewriteModel(String model) {
+        rewriteModel = model == null ? "" : model.trim();
+    }
+
+    /**
+     * 存 API Key：**明文**写进 settings.txt（§6.3 拍板的方案，方便手改；界面只回显前 4 位）。
+     * 首尾空白会被去掉 —— 从网页复制粘贴时经常多带一个空格，那会让服务端回 401。
+     */
+    static void setRewriteKey(String key) {
+        rewriteKey = key == null ? "" : key.trim();
+    }
+
+    static void setRewriteTimeout(int millis) {
+        rewriteTimeout = VoiceRewrite.clampTimeout(millis);
+    }
+
+    /**
+     * 第 ② 步的唯一入口：把当前设置 + 本机 HTTP 出口 + 日志出口一起交给 {@link VoiceRewrite}。
+     *
+     * <p>为什么收成一个方法：{@link VoiceSession} 的识别 worker 只需要「给原文和候选，拿结果」，
+     * 不该知道服务商/地址/超时/key 这些键怎么读；而 {@link VoiceRewrite} 又不许 import MC 类，
+     * 所以「读设置 + 注入 MC 的 logger」这层粘合留在本类。
+     *
+     * <p><b>只在识别 worker 线程调用</b>（内部会发 HTTP）；主线程调它会卡住游戏。
+     */
+    static VoiceRewrite.Result rewriteSpeech(String text, List<VoiceRewrite.Candidate> candidates,
+                                             ToIntFunction<String> stackOf) {
+        loadSettings();
+        VoiceRewrite.Preset preset = VoiceRewrite.preset(rewritePreset);
+        VoiceRewrite.ModelPick pick = VoiceRewrite.model(preset.id(), rewriteModel, null);
+        VoiceRewrite.setEnabled(rewrite);
+        VoiceRewrite.Options options = new VoiceRewrite.Options(rewrite, preset.url(),
+                pick.model(), rewriteKey, VoiceRewrite.clampTimeout(rewriteTimeout), false);
+        VoiceRewrite.setLog(message -> LOG.debug(message));
+        return VoiceRewrite.rewrite(text, candidates, options, VoiceRewrite.httpTransport(), stackOf);
+    }
+
+    /**
+     * 主线程收尾用：AI 那边攒下了「Key 无效」这类必须让玩家知道的事时，**顺手把开关置回 off 并落盘**
+     * （§5.5 的失败矩阵：提示一次 + 自动关闭，避免每句话都白跑一趟）。
+     *
+     * @return 要显示的中文提示；没有事就是空串（空串时不动设置）
+     */
+    static String consumeRewriteNotice() {
+        String text = VoiceRewrite.consumeNotice();
+        if (text == null || text.isEmpty()) {
+            return "";
+        }
+        rewrite = false;
+        saveAndApply();
+        return text;
+    }
+
     /** 设置页点「保存」时调用：落盘 + 在后台把不再需要的模型从内存里放掉、把新的装上。 */
-    static void saveAndApply() {
-        synchronized (SETTINGS_LOCK) {
+    static void saveAndApply() {        synchronized (SETTINGS_LOCK) {
             settingsLoaded = true;
             saveSettings();
         }
@@ -476,7 +696,9 @@ final class SherpaEngine {
         if (model == null) {
             return;
         }
-        VoiceModelDownloader.start(model, mirror);
+        // 先把设置读进来：下载用的是「玩家选的源」，不能依赖「别处刚好已经触发过加载」。
+        loadSettings();
+        VoiceModelDownloader.start(model, mirrorMode, mirror);
     }
 
     static void cancelDownload() {
@@ -494,7 +716,8 @@ final class SherpaEngine {
     /** 下载完成后调：如果它就是当前要用的模型，立刻在后台装进内存，不用重进游戏。 */
     static void afterDownload(String id) {
         VoiceModel model = VoiceModelCatalog.byId(id);
-        if (model == null) {
+        if (model == null || !VoiceModelStore.installed(model)) {
+            // 取消、断网、下到一半失败都会走到这里：没装好就不报「下载完成」。
             return;
         }
         notice = "「" + model.label() + "」下载完成，已可以使用";
@@ -505,6 +728,25 @@ final class SherpaEngine {
         }, "warehouse-keeper-voice-after-download");
         worker.setDaemon(true);
         worker.start();
+    }
+
+    private static volatile boolean wasDownloading;
+
+    /**
+     * 客户端每 tick 调一次（{@link VoiceMod} 里挂着）：下载结束这件事不该只有开着语音设置页才有人接手 ——
+     * 从主体面板的附属设置页点的下载，页面随时可能被关掉。这里看到「刚刚还在下、现在不下了」就收尾；
+     * 于是面板和语音界面两条路都能把模型装进内存。
+     */
+    static void tickDownload() {
+        boolean running = downloading();
+        if (wasDownloading && !running) {
+            VoiceModelDownloader.Progress progress = downloadProgress();
+            if (progress != null && progress.finished()
+                    && (progress.problem() == null || progress.problem().isEmpty())) {
+                afterDownload(progress.modelId());
+            }
+        }
+        wasDownloading = running;
     }
 
     /** 设置页删掉一个模型后调：把内存里的那份也放掉。 */
@@ -791,7 +1033,11 @@ final class SherpaEngine {
      *         而放大 8 倍同时也把底噪放大了 8 倍。</li>
      * </ol>
      * 现在用 20 ms 帧的**第 95 百分位**代表人声、**第 10 百分位**代表噪声底：信噪比不达标就直接
-     * 告诉玩家「太轻/太远」而不是硬塞给模型；达标时按人声电平归一化，并留削顶余量。
+     * 给玩家一个原因而不是硬塞给模型；达标时按人声电平归一化，并留削顶余量。
+     *
+     * <p>拒收时的原因分两种（V-06）：低频能量占比高，说明是环境里的轰鸣/交流声盖住了人声；
+     * 否则才是「人声太轻或太远」。两种情况该给的建议方向相反，合在一起报会把玩家带偏
+     * （见 {@link #RUMBLE_RATIO} 与 {@link #lowBandRatio}）。
      */
     private static Prepared prepare(byte[] pcm, int length) {
         // V-02：公开入口不信任调用方给的 length —— 越界以前会抛 ArrayIndexOutOfBoundsException，
@@ -850,6 +1096,19 @@ final class SherpaEngine {
         // 只判一条：人声段要压过噪声底。刻意不做「起伏必须多大」这类判据 ——
         // 声音稳、停顿少的正常说话起伏也小，会被误判成「没说话」，方向刚好和要修的问题相反。
         if (speechRms < SNR_REJECT * floor) {
+            // V-06：同样是「信噪比不达标」，成因往往是相反的两种 ——
+            // 一个是玩家说话太轻/太远，另一个是环境里有个低频轰鸣（空调、风扇、变压器、
+            // 地环路交流声）把人声盖住了。两者该给的建议方向相反（前者要靠近麦克风，
+            // 后者要挪开噪声源、关掉麦克风的「增强/自动增益」），所以先看低频能量占比，
+            // 再决定说哪一句；不再一律报「人声太轻或太远」。
+            double lowRatio = lowBandRatio(pcm, count);
+            if (lowRatio >= RUMBLE_RATIO) {
+                return failed("环境里的低频轰鸣/交流声太强（低频占 " + Math.round(lowRatio * 100.0D)
+                        + "%，人声 " + Math.round(speechRms) + "，中位 " + Math.round(middleRms)
+                        + "，环境噪声 " + Math.round(noiseRms) + "）——是低频噪声盖住了人声，不是说话太轻："
+                        + "离风扇、音响、变压器、电源线远一点，或关掉麦克风的「增强／自动增益」再试一次",
+                        peak, noiseRms, speechRms);
+            }
             return failed("人声太轻或太远（人声 " + Math.round(speechRms) + "，中位 " + Math.round(middleRms)
                     + "，环境噪声 " + Math.round(noiseRms) + "）——靠近麦克风、说大声点再说一次",
                     peak, noiseRms, speechRms);
@@ -888,6 +1147,35 @@ final class SherpaEngine {
         Audio audio = new Audio(used, peak, noiseRms, speechRms, gain, null);
         LOG.info("录音体检：{}（掐掉首尾后 {} 个样本）", audio.detail(), used);
         return new Prepared(out, audio);
+    }
+
+    /**
+     * 低频能量占比（0~1）：把整段信号过两级一阶低通到 {@link #RUMBLE_HZ}，再与原始信号比均方根。
+     *
+     * <p>为什么从**原始采样**重算、而不是在已经算好的 {@code filtered[]} 上取：那上面已有 70 Hz
+     * 高通，交流声被削掉了一大截，反而看不出「本来有多少低频」。这里只读不写，对 {@link #prepare}
+     * 的峰值/人声/噪声底/增益没有任何影响 —— V-06 要求「170/250/2000 三档增益输出不变」，
+     * 靠的就是这个判据只做加法、不参与音频处理。
+     *
+     * <p>两级级联而不是一级：一级一阶低通只有 6 dB/倍频的滚降，1 kHz 的人声谐波还能漏进来不少；
+     * 两级 12 dB/倍频才把「低频轰鸣」和「带谐波的说话」真正分开。
+     *
+     * @param count 已经和 {@code pcm.length} 取过小的采样点数，所以 {@link #sampleAt} 不会越界
+     */
+    private static double lowBandRatio(byte[] pcm, int count) {
+        double b = Math.exp(-2.0D * Math.PI * RUMBLE_HZ / MicCapture.SAMPLE_RATE);
+        double one = 0.0D;
+        double two = 0.0D;
+        double raw = 0.0D;
+        double low = 0.0D;
+        for (int i = 0; i < count; i++) {
+            double x = sampleAt(pcm, i);
+            one = (1.0D - b) * x + b * one;
+            two = (1.0D - b) * one + b * two;
+            raw += x * x;
+            low += two * two;
+        }
+        return raw <= 0.0D ? 0.0D : Math.sqrt(low / raw);
     }
 
     private static Prepared failed(String problem) {
@@ -1069,6 +1357,8 @@ final class SherpaEngine {
                 saveSettings();
                 return;
             }
+            // mirrorMode= 是权威键；老文件里没有它时，按 mirror= 的地址反推（见 VoiceMirrors.modeOf）。
+            String modeFromFile = null;
             for (String raw : Files.readAllLines(file, StandardCharsets.UTF_8)) {
                 String line = raw.trim();
                 if (line.isEmpty() || line.startsWith("#") || !line.contains("=")) {
@@ -1076,7 +1366,8 @@ final class SherpaEngine {
                 }
                 String[] parts = line.split("=", 2);
                 String key = parts[0].trim().toLowerCase(Locale.ROOT);
-                String value = parts[1].trim().toLowerCase(Locale.ROOT);
+                String rawValue = parts[1].trim();
+                String value = rawValue.toLowerCase(Locale.ROOT);
                 switch (key) {
                     case "primary" -> {
                         String id = VoiceModelCatalog.canonicalId(value);
@@ -1098,14 +1389,69 @@ final class SherpaEngine {
                     case "parallel" -> parallel = truthy(value);
                     case "preload" -> preload = truthy(value);
                     case "mirror" -> {
-                        if (value.startsWith("http")) {
-                            mirror = value;
+                        // 自定义前缀大小写敏感，所以这里用的是原文而不是转小写后的 value。
+                        if (rawValue.startsWith("http") || rawValue.startsWith("HTTP")) {
+                            mirror = rawValue;
+                            if (modeFromFile == null) {
+                                modeFromFile = VoiceMirrors.modeOf(rawValue);
+                            }
+                        }
+                    }
+                    case "mirrormode" -> {
+                        String canonical = VoiceMirrors.canonical(rawValue);
+                        if (canonical != null) {
+                            modeFromFile = canonical;
+                        } else {
+                            // 认不出的值不静默忽略：写日志并按官方处理，免得「设置页显示 A、实际走 B」。
+                            LOG.warn("设置文件里的 mirrorMode={} 认不出来，改用默认的 {}",
+                                    rawValue, VoiceMirrors.DEFAULT_MODE);
+                            modeFromFile = VoiceMirrors.DEFAULT_MODE;
+                        }
+                    }
+                    // ---- AI 口语归一化（第 ② 步）。全部手改可生效：手改重进游戏生效 ----
+                    case "rewrite" -> rewrite = truthy(value);
+                    case "rewrite.mode" -> {
+                        String mode = VoiceRewrite.canonicalMode(rawValue);
+                        if (mode != null) {
+                            rewriteMode = mode;
+                        } else {
+                            // 和 mirrorMode 一个规矩：认不出的值写日志并按默认处理，免得「界面显示 A、实际走 B」
+                            LOG.warn("设置文件里的 rewrite.mode={} 认不出来，改用默认的 {}",
+                                    rawValue, VoiceRewrite.modeLabel(VoiceRewrite.MODE_BOTH));
+                            rewriteMode = VoiceRewrite.MODE_BOTH;
+                        }
+                    }
+                    case "rewrite.preset", "rewrite.channel" -> {
+                        String id = VoiceRewrite.canonicalPresetId(value);
+                        if (id != null) {
+                            rewritePreset = id;
+                        } else {
+                            // 和 mirrorMode 一个规矩：认不出的值写日志并按默认（智谱）处理，让界面别显示一个不存在的服务
+                            LOG.warn("设置文件里的 rewrite.preset={} 认不出来，改用默认的 {}",
+                                    rawValue, VoiceRewrite.defaultPresetId());
+                            rewritePreset = "";
+                        }
+                    }
+                    // 地址/模型/key 大小写敏感（尤其 key），所以这里用的是 rawValue 而不是转小写后的 value
+                    case "rewrite.url" -> rewriteUrl = VoiceRewrite.normalizeUrl(rawValue);
+                    case "rewrite.model" -> rewriteModel = rawValue;
+                    case "rewrite.key" -> rewriteKey = rawValue.trim();
+                    case "rewrite.timeout" -> {
+                        int millis = parseTimeout(rawValue);
+                        if (millis > 0) {
+                            rewriteTimeout = VoiceRewrite.clampTimeout(millis);
+                        } else {
+                            LOG.warn("设置文件里的 rewrite.timeout={} 不是 500–3000 的整数，改用默认 {} 毫秒",
+                                    rawValue, VoiceRewrite.DEFAULT_TIMEOUT_MS);
                         }
                     }
                     default -> {
                         // 老版本或手写的别的键：忽略
                     }
                 }
+            }
+            if (modeFromFile != null) {
+                mirrorMode = modeFromFile;
             }
         } catch (Throwable t) {
             LOG.warn("读取语音设置失败：{}", t.toString());
@@ -1119,6 +1465,19 @@ final class SherpaEngine {
                 || value.equals("开");
     }
 
+    /**
+     * 读 {@code rewrite.timeout=}。不是 1–99999 的整数就返回 0（调用方写日志并用默认值），
+     * 绝不当成 0 毫秒超时 —— 那会让每一次请求都立刻失败。
+     */
+    private static int parseTimeout(String rawValue) {
+        try {
+            int millis = Integer.parseInt(rawValue.trim());
+            return millis > 0 ? millis : 0;
+        } catch (NumberFormatException notANumber) {
+            return 0;
+        }
+    }
+
     private static void saveSettings() {
         try {
             Path file = settingsFile();
@@ -1129,13 +1488,35 @@ final class SherpaEngine {
                     + "# compare   = on | off    聊天栏里是否多显示副模型那一行（副模型始终在下单流程里干活）\n"
                     + "# parallel  = on | off    多个模型是否并行跑（关掉就一个接一个，慢但省内存）\n"
                     + "# preload   = on | off    进游戏后是否在后台先把模型装进内存\n"
-                    + "# mirror    = 下载模型用的镜像地址（默认 " + VoiceModelCatalog.defaultMirror() + "）\n"
+                    + "# mirrorMode= " + mirrorModeIds() + "   下载源（设置页点着换；默认 official 官方原始源）\n"
+                    + "#             官方连不上时再考虑镜像；modelscope 目前只收录 SenseVoice，其他模型自动回退官方\n"
+                    + "# mirror    = 自定义下载前缀，只在 mirrorMode=custom 时生效；也为老版本保留一个能用的地址\n"
+                    + "#\n"
+                    + "# ---- AI 口语归一化（可选，默认关；关着时一个字节都不出网）----\n"
+                    + "# rewrite        = on | off    本地听不出时才把「识别文字 + 本地前 5 名候选」发给云端小模型改写\n"
+                    + "# rewrite.mode   = " + String.join(" | ", VoiceRewrite.modeIds())
+                    + "    改写方式：both=本地优先、没把握再问 AI；local=完全本地；ai=每句先问 AI\n"
+                    + "# rewrite.preset = " + VoiceRewrite.presetIds() + "   服务商（默认 zhipu 智谱 BigModel）\n"
+                    + "# rewrite.url    = 接口地址，留空 = 用预设的默认地址；自定义服务在这里填\n"
+                    + "# rewrite.model  = 模型名，留空 = 用预设的默认模型\n"
+                    + "# rewrite.key    = API Key。**本机明文保存**，只发给上面那个地址；界面里只回显前 4 位\n"
+                    + "#                  （本地 Ollama 不用填；填了也只会发给 127.0.0.1）\n"
+                    + "# rewrite.timeout= " + VoiceRewrite.MIN_TIMEOUT_MS + "–" + VoiceRewrite.MAX_TIMEOUT_MS
+                    + "    一次请求的超时毫秒（默认 " + VoiceRewrite.DEFAULT_TIMEOUT_MS + "）\n"
                     + "primary=" + primaryKey + "\n"
                     + "secondary=" + secondaryKey + "\n"
                     + "compare=" + (showOther ? "on" : "off") + "\n"
                     + "parallel=" + (parallel ? "on" : "off") + "\n"
                     + "preload=" + (preload ? "on" : "off") + "\n"
-                    + "mirror=" + mirror + "\n", StandardCharsets.UTF_8);
+                    + "mirrorMode=" + mirrorMode + "\n"
+                    + "mirror=" + VoiceMirrors.persistedBase(mirrorMode, mirror) + "\n"
+                    + "rewrite=" + (rewrite ? "on" : "off") + "\n"
+                    + "rewrite.mode=" + rewriteMode + "\n"
+                    + "rewrite.preset=" + rewritePreset + "\n"
+                    + "rewrite.url=" + rewriteUrl + "\n"
+                    + "rewrite.model=" + rewriteModel + "\n"
+                    + "rewrite.key=" + rewriteKey + "\n"
+                    + "rewrite.timeout=" + rewriteTimeout + "\n", StandardCharsets.UTF_8);
         } catch (Throwable t) {
             LOG.warn("保存语音设置失败：{}", t.toString());
         }
@@ -1149,6 +1530,18 @@ final class SherpaEngine {
                 builder.append(" | ");
             }
             builder.append(model.id());
+        }
+        return builder.toString();
+    }
+
+    /** 同上，下载源的可选值：同样从唯一权威清单生成，加一家镜像站不用改注释。 */
+    private static String mirrorModeIds() {
+        StringBuilder builder = new StringBuilder();
+        for (String id : VoiceModelCatalog.mirrorChoices()) {
+            if (builder.length() > 0) {
+                builder.append(" | ");
+            }
+            builder.append(id);
         }
         return builder.toString();
     }

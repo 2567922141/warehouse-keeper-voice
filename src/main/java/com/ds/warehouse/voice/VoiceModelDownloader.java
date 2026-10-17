@@ -39,6 +39,8 @@ import java.util.function.Consumer;
  *     <li><b>同时只允许一个任务。</b>两个线程往同一个 {@code .part} 里写，
  *         会得到「前半段是旧数据、后半段是新数据、大小还正好对得上」的文件，
  *         只有哈希能发现 —— 这种事不该有机会发生。</li>
+ *     <li><b>下载源是有序候选表</b>（{@link VoiceFile#sources}，拼法在 {@link VoiceMirrors}）：
+ *         一个源失败就换下一个，{@code .part} 留着给下一个源续传；进度里会写清楚当前用的是哪个源。</li>
  * </ul>
  */
 public final class VoiceModelDownloader {
@@ -129,6 +131,10 @@ public final class VoiceModelDownloader {
             out.append(name).append("  ").append(String.format(Locale.ROOT,
                     "%.1f / %d MB  %.0f%%  %.1f MB/s",
                     doneBytes / 1048576.0D, totalBytes / 1048576L, ratio() * 100.0D, mbps()));
+            // 显示「当前源」：玩家选了自动/镜像后，最想知道的就是这一份到底从哪儿下来的。
+            if (source != null && !source.isEmpty()) {
+                out.append("  [").append(VoiceMirrors.sourceLabel(source)).append(']');
+            }
             if (running && file != null && !file.isEmpty()) {
                 out.append("  ").append(file);
                 if (fileCount > 1) {
@@ -147,7 +153,10 @@ public final class VoiceModelDownloader {
         final Path dir;
         final List<VoiceFile> files;
         final long total;
-        final String mirror;
+        /** 下载源模式 id（见 {@link VoiceMirrors}）；拼地址时交给 {@link VoiceFile#sources}。 */
+        final String mode;
+        /** 自定义前缀，只有 {@link VoiceMirrors#CUSTOM} 模式下用得到。 */
+        final String customBase;
         final long startedAt = System.currentTimeMillis();
         volatile boolean cancel;
         int index = -1;
@@ -157,12 +166,13 @@ public final class VoiceModelDownloader {
         long partial;
         String source = "";
 
-        Task(VoiceModel model, String mirror) {
+        Task(VoiceModel model, String mode, String customBase) {
             this.model = model;
             this.dir = VoiceModelStore.dirOf(model);
             this.files = model.files();
             this.total = model.totalBytes();
-            this.mirror = mirror;
+            this.mode = mode;
+            this.customBase = customBase;
         }
 
         String fileName() {
@@ -215,8 +225,11 @@ public final class VoiceModelDownloader {
      *
      * <p>等不到旧线程结束就**拒绝启动**而不是硬开第二个：两个线程往同一个 .part 里写，
      * 会产出「大小正确、内容错一半」的文件，只有哈希能发现。宁可让玩家再点一次。
+     *
+     * @param mode       下载源模式（{@link VoiceMirrors} 里的 id），null/认不出按官方处理
+     * @param customBase 自定义前缀，只有 {@code custom} 模式用
      */
-    public static void start(VoiceModel model, String mirrorBase) {
+    public static void start(VoiceModel model, String mode, String customBase) {
         if (model == null) {
             return;
         }
@@ -238,7 +251,7 @@ public final class VoiceModelDownloader {
                 }
             }
             endedAt = 0L;
-            Task fresh = new Task(model, mirrorBase);
+            Task fresh = new Task(model, mode, customBase);
             task = fresh;
             current = new Progress(model.id(), "", 0, fresh.files.size(), 0L, fresh.total,
                     fresh.startedAt, true, false, null, "");
@@ -248,6 +261,11 @@ public final class VoiceModelDownloader {
             thread.start();
             log("开始下载 " + model.label() + "（" + model.displaySize() + "，" + fresh.files.size()
                     + " 个文件）→ " + fresh.dir);
+            log("下载源：" + VoiceMirrors.describe(mode, customBase));
+            String fallback = VoiceMirrors.fallbackReason(mode, model);
+            if (fallback != null) {
+                log(fallback);
+            }
         }
     }
 
@@ -298,10 +316,18 @@ public final class VoiceModelDownloader {
                 log("已存在且大小正确，跳过：" + file.name());
                 continue;
             }
-            List<String> urls = file.sources(task.mirror);
+            List<String> urls = file.sources(task.mode, task.customBase);
             if (urls.isEmpty()) {
                 return "「" + file.name() + "」没有可用的下载源（仓库信息为空）";
             }
+            // 魔搭只收录了 SenseVoice：选魔搭却给不出魔搭地址时，明确说一句「这个文件回退官方」，
+            // 不然日志里少一家源会看起来像配置没生效。
+            if (!file.hasModelScope()
+                    && (VoiceMirrors.MODELSCOPE.equals(VoiceMirrors.canonical(task.mode))
+                    || VoiceMirrors.AUTO.equals(VoiceMirrors.canonical(task.mode)))) {
+                log(VoiceMirrors.skipModelScopeReason(file));
+            }
+            log("候选下载源（按顺序试）：" + String.join(" ， ", urls));
             String last = null;
             boolean ok = false;
             for (String url : urls) {

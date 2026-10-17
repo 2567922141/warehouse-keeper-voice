@@ -1,5 +1,6 @@
 package com.ds.warehouse.voice;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Consumer;
 
@@ -10,7 +11,7 @@ import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.Component;
 
 /**
- * 语音设置页：选主模型、选副模型、下载/删除模型、开关对照与并行、切换下载镜像。
+ * 语音设置页：选主模型、选副模型、下载/删除模型、开关对照与并行、切换下载源。
  *
  * <p>为什么做成一个独立的 Screen 而不是别的模组的配置页：语音包是独立模组，它不该依赖仓库
  * 模组的界面代码（仓库模组反过来也不该知道语音模型的存在）；而 Fabric 又没有「往别人配置页里
@@ -49,6 +50,15 @@ public class VoiceSettingsScreen extends Screen {
     private static final int BAR_H = 6;
     /** 装不下的判定下限：面板高度小于这个值就只显示提示（再挤也没法看了）。 */
     private static final int MIN_PANEL_H = 120;
+
+    // ---- 「AI 归一化」分区的行号（第 ② 步；加行就改 AI_ROWS 与 buildAiRows 里的 switch） ----
+    private static final int AI_SWITCH = 0;
+    private static final int AI_MODE = 1;
+    private static final int AI_SERVICE = 2;
+    private static final int AI_MODEL = 3;
+    private static final int AI_KEY = 4;
+    private static final int AI_STATUS = 5;
+    private static final int AI_ROWS = 6;
 
     // ---- 配色（ARGB） ----
     private static final int C_SCRIM = 0xC0101010;
@@ -89,6 +99,9 @@ public class VoiceSettingsScreen extends Screen {
     private int optionsHeadY;
     private int optionsY1;
     private int optionsY2;
+    /** AI 归一化分区的小节标题与 5 行的 y（索引见 {@link #AI_ROW_*}）。 */
+    private int aiHeadY;
+    private final int[] aiRowY = new int[AI_ROWS];
     private int barY;
     private int statusY;
     private int bottomY;
@@ -111,7 +124,14 @@ public class VoiceSettingsScreen extends Screen {
         wasDownloading = SherpaEngine.downloading();
         if (status.isEmpty()) {
             status = "当前主模型：" + shortName(SherpaEngine.primaryId())
-                    + "；镜像：" + host(SherpaEngine.mirror());
+                    + "；下载源：" + SherpaEngine.mirrorLabel()
+                    + "；AI 归一化：" + (SherpaEngine.rewriteOn()
+                            ? "开（" + SherpaEngine.rewriteModeLabel() + "）" : "关");
+            String fallback = SherpaEngine.mirrorFallback(
+                    VoiceModelCatalog.byId(SherpaEngine.primaryId()));
+            if (fallback != null) {
+                status = status + "（" + fallback + "）";
+            }
         }
         if (tiny) {
             addRenderableWidget(Button.builder(Component.literal("关闭"), b -> onClose())
@@ -122,6 +142,7 @@ public class VoiceSettingsScreen extends Screen {
         buildPrimaryRows();
         buildSecondaryRow();
         buildOptionRows();
+        buildAiRows();
         buildBottomRow();
     }
 
@@ -183,7 +204,7 @@ public class VoiceSettingsScreen extends Screen {
         }
     }
 
-    /** 三个开关一行 + 镜像一行。 */
+    /** 三个开关一行 + 下载源一行。 */
     private void buildOptionRows() {
         int rowW = pw - 2 * PAD;
         int w = Math.max(20, (rowW - 2 * GAP) / 3);
@@ -199,7 +220,7 @@ public class VoiceSettingsScreen extends Screen {
             SherpaEngine.setPreload(v);
             status = "预加载已" + (v ? "开" : "关") + "，点「保存并应用」后生效";
         }));
-        String label = fit("下载镜像：" + host(SherpaEngine.mirror()) + "（点一下换）", rowW - 6);
+        String label = fit("下载源：" + SherpaEngine.mirrorLabel() + "（点一下换）", rowW - 6);
         addRenderableWidget(Button.builder(Component.literal(label), b -> cycleMirror())
                 .bounds(px + PAD, optionsY2, rowW, ROW_H).build());
     }
@@ -275,13 +296,180 @@ public class VoiceSettingsScreen extends Screen {
         if (choices.isEmpty()) {
             return;
         }
-        int index = choices.indexOf(SherpaEngine.mirror());
+        int index = choices.indexOf(SherpaEngine.mirrorMode());
         String next = choices.get((index + 1) % choices.size());
-        SherpaEngine.setMirror(next);
+        SherpaEngine.setMirrorMode(next);
         dirty = true;
         pendingDeleteId = "";
-        status = "下载镜像改成 " + host(next) + "，点「保存并应用」后生效";
+        status = "下载源改成「" + VoiceMirrors.label(next) + "」，点「保存并应用」后生效";
+        String fallback = SherpaEngine.mirrorFallback(VoiceModelCatalog.byId(SherpaEngine.primaryId()));
+        if (fallback != null) {
+            status = status + "；" + fallback;
+        }
         rebuildWidgets();
+    }
+
+    /**
+     * AI 归一化分区（第 ② 步）：开关 / 服务 / 模型 / Key / 状态。
+     *
+     * <p>这一版只做到「能填 key、能换服务、能看状态」；{@code rewrite.url} 与
+     * {@code rewrite.model} 的自定义值仍走手改 settings.txt（重进游戏生效）—— 见计划书 §6.1。
+     * 先把主链路做对，输入框留到下一步，免得设置页里塞一整排文本框。
+     */
+    private void buildAiRows() {
+        int rowW = pw - 2 * PAD;
+        // 行 1：总开关。关着时一个字节都不出网，所以这一行的状态要写得最明白。
+        boolean on = SherpaEngine.rewriteOn();
+        addRenderableWidget(toggle("AI 归一化：", on, rowW, px + PAD, aiRowY[AI_SWITCH], v -> {
+            SherpaEngine.setRewrite(v);
+            status = v
+                    ? "AI 归一化已开：当前方式「" + SherpaEngine.rewriteModeLabel()
+                            + "」，仍由本地匹配器决定下不下单；点「保存并应用」后生效"
+                    : "AI 归一化已关：不会再有任何请求出网，点「保存并应用」后生效";
+        }));
+
+        // 行 2：改写方式（完全本地 / 两个一起 / 完全 AI）。点一下按顺序换下一个。
+        int modeW = Math.max(20, (rowW - 3 * GAP) * 2 / 3);
+        addRenderableWidget(Button.builder(
+                        Component.literal(fit("方式：" + SherpaEngine.rewriteModeLabel() + "（点一下换）", modeW - 6)),
+                        b -> cycleRewriteMode())
+                .bounds(px + PAD, aiRowY[AI_MODE], modeW, ROW_H).build());
+        addRenderableWidget(Button.builder(Component.literal("说明"), b -> {
+            status = "方式只决定「什么时候问 AI」：两个一起＝本地没把握才问；"
+                    + "完全调用 AI＝每句先问一次（AI 答不上才用本地）；完全使用本地规则＝一次都不问。"
+                    + "改完点「保存并应用」生效。";
+            dirty = true;
+            pendingDeleteId = "";
+            rebuildWidgets();
+        }).bounds(px + PAD + modeW + GAP, aiRowY[AI_MODE],
+                rowW - modeW - GAP, ROW_H).build());
+
+        // 行 3：服务商循环（智谱 → 硅基流动 → 本地 Ollama → 自定义）。
+        VoiceRewrite.Preset current = VoiceRewrite.preset(SherpaEngine.rewritePreset());
+        int serviceW = Math.max(20, (rowW - 3 * GAP) * 2 / 3);
+        addRenderableWidget(Button.builder(
+                        Component.literal(fit("服务：" + current.label() + "（点一下换）", serviceW - 6)),
+                        b -> cycleRewriteService())
+                .bounds(px + PAD, aiRowY[AI_SERVICE], serviceW, ROW_H).build());
+        addRenderableWidget(Button.builder(Component.literal("地址 ↗"), b -> {
+            // 自定义服务要先有地址才谈得上调用：这里只提示去手改，不假装能在这行里填
+            status = "自定义服务在 settings.txt 里改 rewrite.url=（现在是「"
+                    + (SherpaEngine.rewriteUrl().isEmpty() ? "空白，还没填" : SherpaEngine.rewriteUrl())
+                    + "」）；手改后重进游戏生效";
+            dirty = true;
+            pendingDeleteId = "";
+            rebuildWidgets();
+        }).bounds(px + PAD + serviceW + GAP, aiRowY[AI_SERVICE],
+                rowW - serviceW - GAP, ROW_H).build());
+
+        // 行 3：模型名 + 换一个（在预设自带的可选模型之间循环）。
+        String model = SherpaEngine.rewriteModel();
+        int modelW = Math.max(20, (rowW - 3 * GAP) * 2 / 3);
+        addRenderableWidget(Button.builder(
+                        Component.literal(fit("模型：" + model, modelW - 6)), b -> cycleRewriteModel())
+                .bounds(px + PAD, aiRowY[AI_MODEL], modelW, ROW_H).build());
+        String valid = SherpaEngine.rewriteModelLooksValid() ? "对标 ✓"
+                : "名字可能和服务对不上（照样能存，调用会由服务端判）";
+        addRenderableWidget(Button.builder(Component.literal(fit(valid, rowW - modelW - GAP - 6)), b -> {
+            status = "模型名以服务端为准；这里只在你填的和当前服务明显不搭时提一句。";
+            rebuildWidgets();
+        }).bounds(px + PAD + modelW + GAP, aiRowY[AI_MODEL],
+                rowW - modelW - GAP, ROW_H).build());
+
+        // 行 4：Key —— 点开输入界面，回显只显示前 4 位。
+        String key = SherpaEngine.rewriteKey();
+        String keyText = key.isBlank() ? "Key：未填（点这里填）"
+                : "Key：" + VoiceRewrite.maskKey(key) + "（点这里改）";
+        addRenderableWidget(Button.builder(Component.literal(fit(keyText, rowW - 6)), b ->
+                        Minecraft.getInstance().setScreenAndShow(new VoiceKeyScreen(this)))
+                .bounds(px + PAD, aiRowY[AI_KEY], rowW, ROW_H).build());
+
+        // 行 5：状态（只读）—— 已用次数 / 上次延迟 / 上次结果。
+        Button statusRow = Button.builder(
+                        Component.literal(fit("状态：" + VoiceRewrite.statusLine(), rowW - 6)), b -> {
+                            status = "AI 归一化统计："
+                                    + (SherpaEngine.rewriteOn() ? "开关是开的" : "开关是关的，不会有请求出网");
+                            rebuildWidgets();
+                        })
+                .bounds(px + PAD, aiRowY[AI_STATUS], rowW, ROW_H).build();
+        statusRow.active = false;
+        addRenderableWidget(statusRow);
+    }
+
+    /** 在三种改写方式之间循环；顺序就是 {@link VoiceRewrite#modeIds()}。 */
+    private void cycleRewriteMode() {
+        List<String> ids = VoiceRewrite.modeIds();
+        String now = SherpaEngine.rewriteMode();
+        int index = Math.max(0, ids.indexOf(now));
+        String next = ids.get((index + 1) % ids.size());
+        SherpaEngine.setRewriteMode(next);
+        dirty = true;
+        pendingDeleteId = "";
+        rebuildWidgets();
+        String detail = switch (next) {
+            case VoiceRewrite.MODE_LOCAL -> "一次都不问 AI，只听本地规则（服务/Key 仍留着，随时切回来）";
+            case VoiceRewrite.MODE_AI -> "每句都能问一次 AI 改写（AI 答不上才用本地结果）";
+            default -> "本地优先，本地没把握时才问一次 AI";
+        };
+        status = "改写方式改成「" + VoiceRewrite.modeLabel(next) + "」：" + detail + "；点「保存并应用」后生效";
+    }
+
+    /** 在四个预设里换下一个；换完顺手把「模型」一起带过去（不然会留着一个别家的名字）。 */
+    private void cycleRewriteService() {
+        List<VoiceRewrite.Preset> presets = VoiceRewrite.presets();
+        String now = SherpaEngine.rewritePreset();
+        int index = 0;
+        for (int i = 0; i < presets.size(); i++) {
+            if (presets.get(i).id().equals(now)) {
+                index = i;
+            }
+        }
+        VoiceRewrite.Preset next = presets.get((index + 1) % presets.size());
+        SherpaEngine.setRewritePreset(next.id());
+        SherpaEngine.setRewriteModel("");
+        dirty = true;
+        pendingDeleteId = "";
+        rebuildWidgets();
+        if (next.url().isEmpty()) {
+            status = "服务改成「" + next.label() + "」：还要在 settings.txt 里填 rewrite.url= 与 rewrite.model=，"
+                    + "手改后重进游戏生效";
+        } else {
+            status = "服务改成「" + next.label() + "」（默认模型 " + next.model() + "），点「保存并应用」后生效";
+        }
+    }
+
+    /** 在「本服务的预设模型 + 留空（用默认）」之间循环。 */
+    private void cycleRewriteModel() {
+        String now = SherpaEngine.rewriteModel();
+        List<String> options = aiModelOptions();
+        int index = options.indexOf(now);
+        String next = options.get((index + 1) % options.size());
+        SherpaEngine.setRewriteModel(next);
+        dirty = true;
+        pendingDeleteId = "";
+        rebuildWidgets();
+        status = next.isEmpty()
+                ? "模型已改回「用服务默认的」，点「保存并应用」后生效"
+                : "模型改成「" + next + "」，点「保存并应用」后生效";
+    }
+
+    /** 当前服务下能点着选的模型名；第一项是空串 = 用预设默认。 */
+    private static List<String> aiModelOptions() {
+        List<String> options = new ArrayList<>();
+        options.add("");
+        VoiceRewrite.Preset preset = VoiceRewrite.preset(SherpaEngine.rewritePreset());
+        if (preset.id().equals("zhipu")) {
+            options.add("glm-4.7-flash");
+            options.add("glm-4-flash-250414");
+            options.add("glm-4-flash");
+        } else if (preset.id().equals("ollama")) {
+            options.add("qwen3:0.6b");
+            options.add("qwen3:4b");
+        } else if (preset.id().equals("siliconflow")) {
+            options.add("Qwen/Qwen3-8B");
+            options.add("Qwen/Qwen3-4B");
+        }
+        return options;
     }
 
     /**
@@ -293,6 +481,7 @@ public class VoiceSettingsScreen extends Screen {
                 + (HEAD_H + GAP) + models.size() * (ROW_H + GAP)
                 + (HEAD_H + GAP) + (ROW_H + GAP)
                 + (HEAD_H + GAP) + 2 * (ROW_H + GAP)
+                + (HEAD_H + GAP) + AI_ROWS * (ROW_H + GAP)
                 + (BAR_H + LINE_H + GAP)
                 + (ROW_H + GAP);
         pw = Math.min(MAX_W, Math.max(160, width - 2 * MARGIN));
@@ -318,6 +507,12 @@ public class VoiceSettingsScreen extends Screen {
         y += ROW_H + GAP;
         optionsY2 = y;
         y += ROW_H + GAP;
+        aiHeadY = y;
+        y += HEAD_H + GAP;
+        for (int i = 0; i < AI_ROWS; i++) {
+            aiRowY[i] = y;
+            y += ROW_H + GAP;
+        }
         barY = y;
         statusY = y + BAR_H + 1;
         y += BAR_H + LINE_H + GAP;
@@ -340,6 +535,8 @@ public class VoiceSettingsScreen extends Screen {
         g.text(this.font, fit("副模型 —— 主模型没听出时再问它一次", pw - 2 * PAD),
                 px + PAD, secondaryHeadY, C_HEAD);
         g.text(this.font, fit("识别选项", pw - 2 * PAD), px + PAD, optionsHeadY, C_HEAD);
+        g.text(this.font, fit("AI 归一化（可选，默认关；关着时一个字节都不出网）", pw - 2 * PAD),
+                px + PAD, aiHeadY, C_HEAD);
     }
 
     @Override
@@ -428,18 +625,6 @@ public class VoiceSettingsScreen extends Screen {
         }
         text = text.trim();
         return text.length() > 10 ? text.substring(0, 10) : text;
-    }
-
-    private static String host(String url) {
-        String text = url == null ? "" : url.trim();
-        int scheme = text.indexOf("://");
-        if (scheme >= 0) {
-            text = text.substring(scheme + 3);
-        }
-        while (text.endsWith("/")) {
-            text = text.substring(0, text.length() - 1);
-        }
-        return text.isEmpty() ? "默认" : text;
     }
 
     /** 逐字截断到可用宽度。字体量宽是唯一可靠的依据：中文一个字大约两个 ASCII 宽，但字体不一定这么算。 */

@@ -44,6 +44,8 @@ public class VoiceMod implements ClientModInitializer {
 
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             VoiceSession.idleTick();
+            // 下载收尾要有人管：面板里的附属设置页点了下载，页面随时可能被关掉（见 tickDownload 的说明）。
+            SherpaEngine.tickDownload();
             // 命令登记的设置页：等聊天界面自己关掉之后再开，不然会被它顶掉（原因见 openSettings()）。
             if (openPending) {
                 openPending = false;
@@ -150,7 +152,7 @@ public class VoiceMod implements ClientModInitializer {
                 + "，对照 " + (SherpaEngine.compareOn() ? "开" : "关")
                 + "，并行 " + (SherpaEngine.parallelOn() ? "开" : "关")
                 + "，预加载 " + (SherpaEngine.preloadOn() ? "开" : "关")
-                + "，镜像 " + SherpaEngine.mirror()
+                + "，下载源 " + SherpaEngine.mirrorLabel()
                 + "；/warehousevoice 打开设置页";
     }
 }

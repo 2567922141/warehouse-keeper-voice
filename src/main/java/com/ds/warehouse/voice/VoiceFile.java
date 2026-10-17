@@ -1,6 +1,5 @@
 package com.ds.warehouse.voice;
 
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 
@@ -15,35 +14,52 @@ import java.util.Locale;
  * <p>{@code sha256} 允许为空：那样下载时只比大小、不做校验。留这个口子不是鼓励省掉校验，
  * 而是因为 HuggingFace 上 {@code tokens.txt} 这类小文件不在 LFS 里，仓库 API 不给哈希，
  * 只能下下来自己算；以后新增条目时可以先把它跑通，再把实测的哈希补上。
+ *
+ * @param name       落盘文件名（也是下载时的默认远端文件名）
+ * @param bytes      确切字节数
+ * @param sha256     期望的 sha256，可为 null（见上文）
+ * @param repo       HuggingFace 仓库名（{@code owner/name}）
+ * @param remoteName 远端文件名，可为 null（那就与 {@link #name} 相同）
+ * @param msRepo     魔搭仓库名，可为 null（表示魔搭没有这个文件，只能回退官方）
+ * @param msRemote   魔搭上的文件名，可为 null（那就与 {@link #name} 相同）；
+ *                   魔搭的文件路径与 HuggingFace 不一定一样，所以要单独存而不是复用 remoteName
  */
-public record VoiceFile(String name, long bytes, String sha256, String repo, String remoteName) {
+public record VoiceFile(String name, long bytes, String sha256, String repo, String remoteName,
+                        String msRepo, String msRemote) {
+
+    /** 没有魔搭镜像的文件（魔搭没收录、或还没核对过）走这个构造器。 */
+    public VoiceFile(String name, long bytes, String sha256, String repo, String remoteName) {
+        this(name, bytes, sha256, repo, remoteName, null, null);
+    }
 
     /**
-     * 有序的候选下载地址，调用方从头试到尾（前面的越快/越顺手，后面的兜底）。
+     * 按下载源模式给出的有序候选地址，调用方从头试到尾（前面的越快/越顺手，后面的兜底）。
      *
-     * @param mirrorBase 用户选的镜像根地址，可为 null/空（那就只用默认的两个源）；
-     *                   末尾多写的 {@code /} 会被去掉，避免拼出 {@code //} 这种地址
+     * <p>地址拼法不在这里，在 {@link VoiceMirrors}：它是下载源的唯一权威清单。
+     * 这样「设置页能选哪些源」和「实际去哪些地址下」不会各写一份、各改各的。
+     *
+     * @param mode       下载源 id（{@code official} / {@code hfm} / {@code modelscope} / {@code auto} /
+     *                   {@code custom}），认不出按默认的官方处理
+     * @param customBase {@code custom} 模式的前缀，可为 null/空（那就只用默认的两个源）
      * @return 去重后的地址表；{@code repo} 为空时返回空表（表示这个文件没地方下，而不是地址写错）
      */
-    public List<String> sources(String mirrorBase) {
-        String repository = repo == null ? "" : repo.trim();
-        if (repository.isEmpty()) {
-            return List.of();
-        }
-        String remote = remoteName == null || remoteName.isBlank() ? name : remoteName.trim();
-        String path = repository + "/resolve/main/" + remote;
-        LinkedHashSet<String> out = new LinkedHashSet<>(3);
-        String mirror = mirrorBase == null ? "" : mirrorBase.trim();
-        while (mirror.endsWith("/")) {
-            mirror = mirror.substring(0, mirror.length() - 1);
-        }
-        if (!mirror.isEmpty()) {
-            out.add(mirror + "/" + path);
-        }
-        // 顺序即尝试顺序：hf-mirror 在国内可达，huggingface.co 只在有代理时能通，放最后。
-        out.add("https://hf-mirror.com/" + path);
-        out.add("https://huggingface.co/" + path);
-        return List.copyOf(out);
+    public List<String> sources(String mode, String customBase) {
+        return VoiceMirrors.sources(this, mode, customBase);
+    }
+
+    /**
+     * 这个文件在魔搭上有没有对应的一份。
+     *
+     * <p>{@code modelscope} / {@code auto} 模式下用它决定「先试魔搭还是直接走官方」：
+     * 没镜像的文件绝不能拼一个不存在的魔搭地址去试（那只会白等一轮超时）。
+     */
+    public boolean hasModelScope() {
+        return VoiceMirrors.hasModelScope(this);
+    }
+
+    /** 魔搭上的完整地址；没有镜像返回 null。 */
+    public String modelScopeUrl() {
+        return VoiceMirrors.modelScopeUrl(this);
     }
 
     /** 文件大小是否正好是这个数（不是「至少」，多一点少一点都算坏文件）。 */
